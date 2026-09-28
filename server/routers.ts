@@ -140,8 +140,14 @@ function addActivity(state: DemoState, label: string, detail: string, tone: Demo
   if (state.activity.length > 200) state.activity = state.activity.slice(0, 200);
 }
 
-function addEvent(state: DemoState, type: Event["type"], label: string, actorId: string, payload: Record<string, unknown>) {
-  const eventTime = now();
+function addEvent(
+  state: DemoState,
+  type: Event["type"],
+  label: string,
+  actorId: string,
+  payload: Record<string, unknown>,
+  eventTime = now()
+) {
   const payloadWithTime = { ...payload };
   const timestampKey = "observedAt" in payloadWithTime ? "observedAt" : "occurredAt";
   payloadWithTime[timestampKey] = eventTime;
@@ -360,6 +366,7 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
       expectedValue: dispatch.dispatchedQuantity,
       observedValue: observedQuantity,
       delta: variance,
+      variance,
       direction: observedQuantity < dispatch.dispatchedQuantity ? "shortage" : "overage",
       status: "open",
       createdAt: event.occurredAt,

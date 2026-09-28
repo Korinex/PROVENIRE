@@ -9,19 +9,6 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 
-async function addHelmetIfAvailable(app: express.Express) {
-  try {
-    const { default: helmet } = await import("helmet");
-    app.use(
-      helmet({
-        contentSecurityPolicy: false,
-      })
-    );
-  } catch {
-    console.warn("[Security] helmet is not installed; skipping security middleware.");
-  }
-}
-
 export function assertRequiredEnv() {
   if (process.env.NODE_ENV === "test") return;
   const required = ["JWT_SECRET"] as const;
@@ -53,7 +40,7 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 export async function startServer(portOverride?: number) {
   assertRequiredEnv();
   const app = express();
-  await addHelmetIfAvailable(app);
+  console.warn("[Security] helmet is not installed; skipping security middleware.");
   const server = createServer(app);
   app.get("/healthz", (_req, res) => {
     res.status(200).json({ status: "ok", uptime: process.uptime() });
