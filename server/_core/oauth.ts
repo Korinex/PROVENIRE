@@ -10,10 +10,15 @@ function getQueryParam(req: Request, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function getAllowedRedirectOrigins() {
+let warnedAboutUnsetRedirectOrigins = false;
+
+export function getAllowedRedirectOrigins() {
   const raw = process.env.ALLOWED_REDIRECT_ORIGINS;
   if (!raw) {
-    console.warn("[OAuth] ALLOWED_REDIRECT_ORIGINS is unset; keeping current redirectUri behavior.");
+    if (!warnedAboutUnsetRedirectOrigins) {
+      console.warn("[OAuth] ALLOWED_REDIRECT_ORIGINS is unset; keeping current redirectUri behavior.");
+      warnedAboutUnsetRedirectOrigins = true;
+    }
     return null;
   }
   return raw
@@ -22,7 +27,18 @@ function getAllowedRedirectOrigins() {
     .filter(Boolean);
 }
 
+export function isAllowedRedirectOrigin(redirectUri: string, allowedOrigins: string[] | null) {
+  if (!allowedOrigins) return true;
+  try {
+    return allowedOrigins.includes(new URL(redirectUri).origin);
+  } catch {
+    return false;
+  }
+}
+
 export function registerOAuthRoutes(app: Express) {
+  const allowedRedirectOrigins = getAllowedRedirectOrigins();
+
   app.get("/api/oauth/callback", async (req: Request, res: Response) => {
     const code = getQueryParam(req, "code");
     const state = getQueryParam(req, "state");
@@ -42,19 +58,9 @@ export function registerOAuthRoutes(app: Express) {
       return;
     }
 
-    const allowedOrigins = getAllowedRedirectOrigins();
-    if (allowedOrigins) {
-      try {
-        const url = new URL(redirectUri);
-        const origin = url.origin;
-        if (!allowedOrigins.includes(origin)) {
-          res.status(400).json({ error: "redirectUri origin not allowed" });
-          return;
-        }
-      } catch {
+    if (!isAllowedRedirectOrigin(redirectUri, allowedRedirectOrigins)) {
         res.status(400).json({ error: "redirectUri origin not allowed" });
         return;
-      }
     }
 
     res.clearCookie(OAUTH_STATE_COOKIE, { path: "/", secure: true, sameSite: "none" });

@@ -12,6 +12,15 @@ function caller() {
 }
 
 describe("Provenire custody protocol", () => {
+  it("runs the clean successful route repeatedly", async () => {
+    const api = caller();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const state = await api.provenire.runHappyPath();
+      expect(state.batch.routeCoverageState).toBe("complete");
+      expect(state.batch.acceptedHandoffs).toBe(2);
+    }
+  });
+
   it("keeps sender-only dispatch receiver-pending", async () => {
     const api = caller();
     const state = await api.provenire.reset();
@@ -66,5 +75,53 @@ describe("Provenire custody protocol", () => {
     const incomplete = await api.provenire.togglePeer({ nodeId: "node-3" });
     expect(incomplete.publicVerifier.verificationStatus).toBe("network_disagreement");
     expect(incomplete.publicVerifier.networkAgreement).toBe(false);
+  });
+
+  it("enforces route and receipt state", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    await expect(api.provenire.dispatch({ receiverId: "ramdeobaba-pharmacy" })).rejects.toThrow();
+    const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    await expect(api.provenire.dispatch({ receiverId: "central-pharma" })).rejects.toThrow();
+    await expect(api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "ramdeobaba-pharmacy", receiverObservedQuantity: 1000 })).rejects.toThrow();
+    await api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 });
+    await expect(api.provenire.dispatch({ receiverId: "medsure-labs" })).rejects.toThrow();
+    await expect(api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 })).rejects.toThrow();
+  });
+
+  it("validates quantity boundaries and preserves shortage/overage direction", async () => {
+    const api = caller();
+    for (const value of [0, -1, 1.5, NaN, Infinity, 1_000_001]) {
+      await api.provenire.reset();
+      const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
+      await expect(api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: value })).rejects.toThrow();
+    }
+    await api.provenire.reset();
+    const shortage = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    const shortageState = await api.provenire.receipt({ dispatchId: shortage.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1 });
+    expect(shortageState.conflicts[0]?.direction).toBe("shortage");
+    await api.provenire.reset();
+    const overage = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    const overageState = await api.provenire.receipt({ dispatchId: overage.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1_000_000 });
+    expect(overageState.conflicts[0]?.direction).toBe("overage");
+  });
+
+  it("reuses one timestamp for event and payload", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const state = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    const event = state.events.at(-1)!;
+    expect(event.occurredAt).toBe(event.payload.occurredAt);
+  });
+
+  it("caps activity while preserving the activity shape and order", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    for (let i = 0; i < 210; i += 1) {
+      await api.provenire.togglePeer({ nodeId: "node-1" });
+    }
+    const state = await api.provenire.state();
+    expect(state.activity.length).toBeLessThanOrEqual(12);
+    expect(state.activity[0]).toMatchObject({ id: expect.any(String), label: expect.any(String), occurredAt: expect.any(String) });
   });
 });
