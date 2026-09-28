@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+<<<<<<< HEAD
   buildReceiptPayload,
+=======
+>>>>>>> 9ffc937 (Add standalone signed proof chain primitives)
   canonicalJson,
   cloneWithEventMutation,
   createProofKeyring,
@@ -43,7 +46,11 @@ function makeValidChain() {
     actorOrgId: "central-pharma",
     occurredAt: "2026-09-28T12:10:00.000Z",
     previousHash: dispatch.recordHash,
+<<<<<<< HEAD
     payload: buildReceiptPayload(dispatch.recordHash, { receiverObservedQuantity: 1000 }),
+=======
+    payload: { dispatchRecordHash: dispatch.recordHash, receiverObservedQuantity: 1000 },
+>>>>>>> 9ffc937 (Add standalone signed proof chain primitives)
   });
 
   return [origin, dispatch, receipt];
@@ -102,6 +109,7 @@ describe("Provenire proof primitives", () => {
     expect(verifyChain(changedReceipt, keyring).events[2]).toMatchObject({ hashOk: false, sigOk: false });
   });
 
+<<<<<<< HEAD
   it("builds receipt payloads with an immutable SHA-256 dispatch link", () => {
     const dispatchRecordHash = "a".repeat(64);
     expect(buildReceiptPayload(dispatchRecordHash, { receiverObservedQuantity: 950 })).toEqual({
@@ -112,6 +120,8 @@ describe("Provenire proof primitives", () => {
     expect(() => buildReceiptPayload(dispatchRecordHash, { dispatchRecordHash })).toThrow("set by the proof module");
   });
 
+=======
+>>>>>>> 9ffc937 (Add standalone signed proof chain primitives)
   it("rejects invalid signatures and unknown actors", () => {
     const events = makeValidChain();
     const invalidSignature = cloneWithEventMutation(events, "event-2", event => ({ ...event, signature: "not-a-valid-signature" }));

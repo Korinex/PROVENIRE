@@ -5,8 +5,11 @@ import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
+<<<<<<< HEAD
 import { assertJwtSecretConfigured } from "./env";
 import { registerHealthz } from "./health";
+=======
+>>>>>>> 9ffc937 (Add standalone signed proof chain primitives)
 import "../proof";
 import { appRouter } from "../routers";
 import { createContext } from "./context";

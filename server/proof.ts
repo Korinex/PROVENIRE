@@ -61,6 +61,7 @@ export function canonicalJson(value: unknown): string {
   return serialized;
 }
 
+<<<<<<< HEAD
 export function buildReceiptPayload(
   dispatchRecordHash: string,
   receiptFields: Record<string, JsonValue>,
@@ -74,6 +75,8 @@ export function buildReceiptPayload(
   return { ...receiptFields, dispatchRecordHash };
 }
 
+=======
+>>>>>>> 9ffc937 (Add standalone signed proof chain primitives)
 export function createProofKeyring(
   organizationIds: readonly string[] = PROOF_ORGANIZATIONS,
 ): ProofKeyring {
