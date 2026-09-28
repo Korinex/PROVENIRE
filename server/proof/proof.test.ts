@@ -38,6 +38,19 @@ describe("standalone proof module", () => {
     expect(chainIsValid(verifyChain([first], {}))).toBe(false);
   });
 
+  it("treats an empty chain as the valid starting state", () => {
+    expect(verifyChain([], {}).length).toBe(0);
+    expect(chainIsValid(verifyChain([], {}))).toBe(true);
+  });
+
+  it("rejects signed payload, quantity, and event type changes", () => {
+    const { keys, getPublicKeyMap } = generateOrgKeys(["org-a"]);
+    const event = sealEvent(keys["org-a"]!.privateKey, body(0, "org-a", "GENESIS", { quantity: 100 }));
+    expect(chainIsValid(verifyChain(tamperClone([event], 0, ["payload", "quantity"], 101), getPublicKeyMap()))).toBe(false);
+    expect(chainIsValid(verifyChain(tamperClone([event], 0, ["type"], "receipt"), getPublicKeyMap()))).toBe(false);
+    expect(chainIsValid(verifyChain(tamperClone([event], 0, ["payload", "item"], "changed"), getPublicKeyMap()))).toBe(false);
+  });
+
   it("detects tampering in every event field and nested payloads", () => {
     const { keys, getPublicKeyMap } = generateOrgKeys(["org-a"]);
     const event = sealEvent(keys["org-a"]!.privateKey, body(0, "org-a", "GENESIS", { nested: { value: 1 } }));

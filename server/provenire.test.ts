@@ -29,6 +29,9 @@ describe("Provenire custody protocol", () => {
     expect(afterDispatch.batch.handoffState).toBe("receiver_pending");
     expect(afterDispatch.batch.currentHolder).toBe("MedSure Labs");
     expect(afterDispatch.batch.activeDispatchId).toBe("dispatch-1");
+    expect(afterDispatch.events.at(-1)?.proof.signature).not.toMatch(/^simulated-/);
+    expect(afterDispatch.publicVerifier.signatureValid).toBe(true);
+    expect(afterDispatch.publicVerifier.hashValid).toBe(true);
   });
 
   it("accepts a matching receiver receipt and advances custody", async () => {
@@ -101,6 +104,7 @@ describe("Provenire custody protocol", () => {
     expect(tampered.publicVerifier.hashValid).toBe(false);
     expect(tampered.publicVerifier.networkAgreement).toBe(true);
     expect(tampered.network.every(node => node.status === "healthy")).toBe(true);
+    expect(tampered.publicVerifier.signatureValid).toBe(false);
     const restored = await api.provenire.restore();
     expect(restored.publicVerifier.verificationStatus).toBe("verified_history");
     const incomplete = await api.provenire.togglePeer({ nodeId: "node-3" });

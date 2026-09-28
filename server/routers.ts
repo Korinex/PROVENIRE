@@ -1,10 +1,11 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
 import { TRPCError } from "@trpc/server";
+import { generateOrgKeys, sealEvent, verifyChain, chainIsValid } from "./proof";
+import type { EventBody as ProofEventBody, SealedEvent } from "./proof/seal";
 
 type OrgRole = "manufacturer" | "distributor" | "hospital_pharmacy";
 type HandoffState = "receiver_pending" | "accepted" | "needs_review";
@@ -20,6 +21,7 @@ type Proof = {
   signer: string;
   signatureValid: boolean;
 };
+type EventBody = ProofEventBody;
 type Event = {
   id: string;
   type: "origin" | "dispatch" | "receipt";
@@ -110,21 +112,21 @@ function now() {
   return new Date().toISOString();
 }
 
-function stableHash(value: unknown) {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
+const orgKeys = generateOrgKeys(organizations.map(org => org.id));
 
 function orgName(state: DemoState, id: string | null | undefined) {
   return state.organizations.find(org => org.id === id)?.name ?? "Unknown organization";
 }
 
-function proofFor(state: DemoState, type: string, actorId: string, payload: Record<string, unknown>, previousHash?: string): Proof {
-  const recordHash = stableHash({ type, payload });
+function proofFor(state: DemoState, body: EventBody): Proof {
+  const key = orgKeys.keys[body.actorOrgId];
+  if (!key) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "No signing key configured for event actor." });
+  const sealed = sealEvent(key.privateKey, body);
   return {
-    recordHash,
-    previousHash: previousHash ?? state.events.at(-1)?.proof.recordHash ?? "GENESIS",
-    signature: `simulated-${actorId}-${recordHash.slice(0, 16)}`,
-    signer: orgName(state, actorId),
+    recordHash: sealed.recordHash,
+    previousHash: sealed.previousHash,
+    signature: sealed.signature,
+    signer: orgName(state, body.actorOrgId),
     signatureValid: true,
   };
 }
@@ -152,14 +154,25 @@ function addEvent(
   const timestampKey = "observedAt" in payloadWithTime ? "observedAt" : "occurredAt";
   payloadWithTime[timestampKey] = eventTime;
 
+  const eventId = `event-${state.events.length + 1}`;
+  const body: EventBody = {
+    eventId,
+    batchId: state.batch.id,
+    seq: state.events.length,
+    type,
+    actorOrgId: actorId,
+    occurredAt: eventTime,
+    payload: payloadWithTime,
+    previousHash: state.events.at(-1)?.proof.recordHash ?? "GENESIS",
+  };
   const event: Event = {
-    id: `event-${state.events.length + 1}`,
+    id: eventId,
     type,
     label,
     actorId,
     occurredAt: eventTime,
     payload: payloadWithTime,
-    proof: proofFor(state, type, actorId, payloadWithTime),
+    proof: proofFor(state, body),
   };
   state.events.push(event);
   return event;
@@ -220,6 +233,7 @@ function makeInitialState(): DemoState {
 }
 
 let state = makeInitialState();
+let tamperedEvents: Event[] | null = null;
 
 function refreshNodeHeads(current: DemoState) {
   const headHash = current.events.at(-1)?.proof.recordHash ?? "GENESIS";
@@ -380,7 +394,20 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
 }
 
 function publicVerifier(current: DemoState) {
-  const tampered = current.batch.recordIntegrityState === "tampered";
+  const proofEvents = current.events.map(event => ({
+    eventId: event.id,
+    batchId: current.batch.id,
+    seq: current.events.indexOf(event),
+    type: event.type,
+    actorOrgId: event.actorId,
+    occurredAt: event.occurredAt,
+    previousHash: event.proof.previousHash,
+    payload: event.payload,
+    recordHash: event.proof.recordHash,
+    signature: event.proof.signature,
+  })) satisfies SealedEvent[];
+  const verification = verifyChain(proofEvents, orgKeys.getPublicKeyMap());
+  const tampered = !chainIsValid(verification);
   const conflictOpen = current.batch.conflictState === "open";
   const networkIncomplete = current.batch.networkState === "incomplete";
   let verificationStatus = "verified_history";
@@ -399,10 +426,10 @@ function publicVerifier(current: DemoState) {
     acceptedHandoffCount: current.batch.acceptedHandoffs,
     verificationStatus,
     recordIntegrityState: tampered ? "invalid" : "valid",
-    identityValid: !tampered,
-    hashValid: !tampered,
-    signatureValid: !tampered,
-    predecessorValid: !tampered,
+    identityValid: verification.every(item => item.sigOk),
+    hashValid: verification.every(item => item.hashOk),
+    signatureValid: verification.every(item => item.sigOk && item.hashOk),
+    predecessorValid: verification.every(item => item.prevOk),
     handoffComplete: current.batch.handoffState === "accepted",
     coverageComplete: current.batch.routeCoverageState === "complete",
     quantityConsistent: current.batch.quantityState === "consistent",
@@ -455,11 +482,13 @@ export const appRouter = router({
     state: publicProcedure.query(() => snapshot(state)),
     reset: publicProcedure.mutation(() => {
       state = makeInitialState();
+      tamperedEvents = null;
       addActivity(state, "Demo reset", "Deterministic scenario restored", "neutral");
       return snapshot(state);
     }),
     runHappyPath: publicProcedure.mutation(() => {
       state = makeInitialState();
+      tamperedEvents = null;
       const first = createDispatch(state, "central-pharma");
       createReceipt(state, first.id, "central-pharma", 1000);
       const second = createDispatch(state, "ramdeobaba-pharmacy");
@@ -469,6 +498,7 @@ export const appRouter = router({
     }),
     runMismatch: publicProcedure.mutation(() => {
       state = makeInitialState();
+      tamperedEvents = null;
       const dispatch = createDispatch(state, "central-pharma");
       createReceipt(state, dispatch.id, "central-pharma", 950);
       addActivity(state, "Mismatch path ready", "Next dispatch is blocked pending resolution", "danger");
@@ -487,6 +517,11 @@ export const appRouter = router({
         return snapshot(state);
       }),
     tamper: publicProcedure.mutation(() => {
+      const event = state.events.at(-1);
+      if (!event) throw new TRPCError({ code: "CONFLICT", message: "No event is available to tamper." });
+      tamperedEvents = structuredClone(state.events);
+      const quantity = event.payload.quantity;
+      event.payload = { ...event.payload, ...(typeof quantity === "number" ? { quantity: quantity + 1 } : { tampered: true }) };
       state.batch.recordIntegrityState = "tampered";
       state.batch.networkState = "incomplete";
       state.network = state.network.map((node, index) => index === 2 ? { ...node, status: "unavailable" as const } : node);
@@ -494,6 +529,10 @@ export const appRouter = router({
       return snapshot(state);
     }),
     restore: publicProcedure.mutation(() => {
+      if (tamperedEvents) {
+        state.events = tamperedEvents;
+        tamperedEvents = null;
+      }
       state.batch.recordIntegrityState = "valid";
       state.batch.networkState = "agreement";
       state.network = state.network.map(node => ({ ...node, status: "healthy" as const }));
