@@ -8,6 +8,8 @@ import { TRPCError } from "@trpc/server";
 
 type OrgRole = "manufacturer" | "distributor" | "hospital_pharmacy";
 type HandoffState = "receiver_pending" | "accepted" | "needs_review";
+type VarianceDirection = "shortage" | "overage";
+const MAX_QUANTITY = 1_000_000;
 
 type Organization = { id: string; name: string; role: OrgRole; shortRole: string };
 type Proof = {
@@ -48,6 +50,7 @@ type Receipt = {
   observedAt: string;
   status: HandoffState;
   variance: number;
+  varianceDirection: VarianceDirection | null;
   proof: Proof;
 };
 type Conflict = {
@@ -58,6 +61,7 @@ type Conflict = {
   expectedValue: number;
   observedValue: number;
   delta: number;
+  direction: VarianceDirection;
   status: "open" | "resolved";
   createdAt: string;
 };
@@ -76,6 +80,7 @@ type DemoState = {
     observedReceiverId: string | null;
     receiverObservedQuantity: number | null;
     quantityVariance: number;
+    varianceDirection: VarianceDirection | null;
     acceptedForOnwardCustody: number;
     handoffState: HandoffState | "origin_verified";
     recordIntegrityState: "valid" | "tampered";
@@ -113,11 +118,12 @@ function orgName(state: DemoState, id: string | null | undefined) {
   return state.organizations.find(org => org.id === id)?.name ?? "Unknown organization";
 }
 
-function proofFor(state: DemoState, type: string, actorId: string, payload: Record<string, unknown>, previousHash?: string): Proof {
-  const recordHash = stableHash({ type, payload });
+function proofFor(state: DemoState, type: string, actorId: string, occurredAt: string, payload: Record<string, unknown>, previousHash?: string): Proof {
+  const predecessor = previousHash ?? state.events.at(-1)?.proof.recordHash ?? "GENESIS";
+  const recordHash = stableHash({ type, actorId, occurredAt, previousHash: predecessor, payload });
   return {
     recordHash,
-    previousHash: previousHash ?? state.events.at(-1)?.proof.recordHash ?? "GENESIS",
+    previousHash: predecessor,
     signature: `simulated-${actorId}-${recordHash.slice(0, 16)}`,
     signer: orgName(state, actorId),
     signatureValid: true,
@@ -128,15 +134,16 @@ function addActivity(state: DemoState, label: string, detail: string, tone: Demo
   state.activity.unshift({ id: `activity-${state.activity.length + 1}`, label, detail, tone, occurredAt: now() });
 }
 
-function addEvent(state: DemoState, type: Event["type"], label: string, actorId: string, payload: Record<string, unknown>) {
+function addEvent(state: DemoState, type: Event["type"], label: string, actorId: string, payload: Record<string, unknown>, occurredAt = now()) {
+  const eventPayload = { ...payload, occurredAt };
   const event: Event = {
     id: `event-${state.events.length + 1}`,
     type,
     label,
     actorId,
-    occurredAt: now(),
-    payload,
-    proof: proofFor(state, type, actorId, payload),
+    occurredAt,
+    payload: eventPayload,
+    proof: proofFor(state, type, actorId, occurredAt, eventPayload),
   };
   state.events.push(event);
   return event;
@@ -158,6 +165,7 @@ function makeInitialState(): DemoState {
       observedReceiverId: null,
       receiverObservedQuantity: null,
       quantityVariance: 0,
+      varianceDirection: null,
       acceptedForOnwardCustody: 1000,
       handoffState: "origin_verified" as const,
       recordIntegrityState: "valid" as const,
@@ -200,7 +208,7 @@ let state = makeInitialState();
 
 function refreshNodeHeads(current: DemoState) {
   const headHash = current.events.at(-1)?.proof.recordHash ?? "GENESIS";
-  current.network = current.network.map(node => ({ ...node, headHash, checkedAt: now() }));
+  current.network = current.network.map(node => node.status === "unavailable" ? node : ({ ...node, headHash, checkedAt: now() }));
 }
 
 function createDispatch(current: DemoState, receiverId: string) {
@@ -214,6 +222,10 @@ function createDispatch(current: DemoState, receiverId: string) {
   if (!receiver) throw new TRPCError({ code: "NOT_FOUND", message: "Receiver organization not found." });
   if (receiverId === current.batch.currentHolderId) {
     throw new TRPCError({ code: "UNPROCESSABLE_CONTENT", message: "Sender and receiver must be different organizations." });
+  }
+  const expectedReceiverId = ["central-pharma", "ramdeobaba-pharmacy"][current.batch.acceptedHandoffs];
+  if (receiverId !== expectedReceiverId) {
+    throw new TRPCError({ code: "UNPROCESSABLE_CONTENT", message: "Dispatch must follow the configured custody route." });
   }
   const id = `dispatch-${current.dispatches.length + 1}`;
   const quantity = current.batch.acceptedForOnwardCustody;
@@ -252,6 +264,9 @@ function createDispatch(current: DemoState, receiverId: string) {
 }
 
 function createReceipt(current: DemoState, dispatchId: string, receiverId: string, observedQuantity: number) {
+  if (!Number.isFinite(observedQuantity) || !Number.isInteger(observedQuantity) || observedQuantity <= 0 || observedQuantity > MAX_QUANTITY) {
+    throw new TRPCError({ code: "BAD_REQUEST", message: `Observed quantity must be a whole number between 1 and ${MAX_QUANTITY}.` });
+  }
   const dispatch = current.dispatches.find(item => item.id === dispatchId);
   if (!dispatch) throw new TRPCError({ code: "NOT_FOUND", message: "Dispatch not found." });
   if (dispatch.status !== "receiver_pending") {
@@ -263,8 +278,10 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
   const receiver = current.organizations.find(org => org.id === receiverId);
   if (!receiver) throw new TRPCError({ code: "NOT_FOUND", message: "Receiver organization not found." });
   const variance = Math.abs(dispatch.dispatchedQuantity - observedQuantity);
+  const varianceDirection: VarianceDirection | null = variance === 0 ? null : observedQuantity < dispatch.dispatchedQuantity ? "shortage" : "overage";
   const status: HandoffState = variance === 0 ? "accepted" : "needs_review";
   const id = `receipt-${current.receipts.length + 1}`;
+  const observedAt = now();
   const payload = {
     type: "receipt",
     dispatchId,
@@ -273,9 +290,9 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
     receiverObservedQuantity: observedQuantity,
     unit: current.batch.unit,
     location: receiver.name,
-    observedAt: now(),
+    observedAt,
   };
-  const event = addEvent(current, "receipt", "Receiver receipt signed", receiverId, payload);
+  const event = addEvent(current, "receipt", "Receiver receipt signed", receiverId, payload, observedAt);
   const receipt: Receipt = {
     id,
     dispatchId,
@@ -286,6 +303,7 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
     observedAt: event.occurredAt,
     status,
     variance,
+    varianceDirection,
     proof: event.proof,
   };
   current.receipts.push(receipt);
@@ -294,6 +312,7 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
   current.batch.observedReceiverId = receiverId;
   current.batch.receiverObservedQuantity = observedQuantity;
   current.batch.quantityVariance = variance;
+  current.batch.varianceDirection = varianceDirection;
   current.batch.handoffState = status;
 
   if (status === "accepted") {
@@ -320,6 +339,7 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
       expectedValue: dispatch.dispatchedQuantity,
       observedValue: observedQuantity,
       delta: variance,
+      direction: varianceDirection!,
       status: "open",
       createdAt: event.occurredAt,
     };
@@ -337,8 +357,8 @@ function publicVerifier(current: DemoState) {
   const networkIncomplete = current.batch.networkState === "incomplete";
   let verificationStatus = "verified_history";
   if (tampered) verificationStatus = "tampered";
-  else if (networkIncomplete) verificationStatus = "network_disagreement";
   else if (conflictOpen) verificationStatus = "needs_review";
+  else if (networkIncomplete) verificationStatus = "network_disagreement";
   else if (current.batch.handoffState === "receiver_pending") verificationStatus = "receiver_pending";
   else if (current.batch.routeCoverageState === "incomplete") verificationStatus = "coverage_incomplete";
 
@@ -433,23 +453,18 @@ export const appRouter = router({
         return snapshot(state);
       }),
     receipt: publicProcedure
-      .input(z.object({ dispatchId: z.string(), receiverId: z.string(), receiverObservedQuantity: z.number().int().min(0) }))
+      .input(z.object({ dispatchId: z.string(), receiverId: z.string(), receiverObservedQuantity: z.number().finite().int().positive().max(MAX_QUANTITY) }))
       .mutation(({ input }) => {
         createReceipt(state, input.dispatchId, input.receiverId, input.receiverObservedQuantity);
         return snapshot(state);
       }),
     tamper: publicProcedure.mutation(() => {
       state.batch.recordIntegrityState = "tampered";
-      state.batch.networkState = "incomplete";
-      state.network = state.network.map((node, index) => index === 2 ? { ...node, status: "unavailable" as const } : node);
       addActivity(state, "Tamper detected", "A signed field no longer matches its stored proof", "danger");
       return snapshot(state);
     }),
     restore: publicProcedure.mutation(() => {
       state.batch.recordIntegrityState = "valid";
-      state.batch.networkState = "agreement";
-      state.network = state.network.map(node => ({ ...node, status: "healthy" as const }));
-      refreshNodeHeads(state);
       addActivity(state, "Proof restored", "Reset or restoration returned the record to a valid state", "good");
       return snapshot(state);
     }),
