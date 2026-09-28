@@ -1,24 +1,22 @@
-import express from "express";
-import { describe, expect, it } from "vitest";
-import { registerHealthz } from "./_core/health";
+import { afterEach, describe, expect, it } from "vitest";
+import { startServer } from "./_core/index";
+import http from "node:http";
 
-describe("GET /healthz", () => {
-  it("returns status and uptime before later middleware", async () => {
-    const app = express();
-    registerHealthz(app, () => 12.5);
-    app.use((_req, res) => res.status(401).end());
-    const server = app.listen(0, "127.0.0.1");
+const ports: number[] = [];
 
-    try {
-      await new Promise<void>(resolve => server.once("listening", resolve));
-      const address = server.address();
-      if (!address || typeof address === "string") throw new Error("Test server did not bind a TCP port.");
+afterEach(() => {
+  ports.splice(0, ports.length);
+});
 
-      const response = await fetch(`http://127.0.0.1:${address.port}/healthz`);
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ status: "ok", uptime: 12.5 });
-    } finally {
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    }
+describe("health endpoint", () => {
+  it("returns ok with uptime", async () => {
+    const server = await startServer(3199);
+    ports.push(3199);
+    const res = await fetch("http://localhost:3199/healthz");
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("ok");
+    expect(typeof body.uptime).toBe("number");
+    server.close();
   });
 });

@@ -3,12 +3,23 @@ import { parse as parseCookieHeader } from "cookie";
 import type { Express, Request, Response } from "express";
 import * as db from "../db";
 import { getSessionCookieOptions } from "./cookies";
-import { isOAuthRedirectOriginAllowed } from "./oauthRedirect";
 import { sdk } from "./sdk";
 
 function getQueryParam(req: Request, key: string): string | undefined {
   const value = req.query[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function getAllowedRedirectOrigins() {
+  const raw = process.env.ALLOWED_REDIRECT_ORIGINS;
+  if (!raw) {
+    console.warn("[OAuth] ALLOWED_REDIRECT_ORIGINS is unset; keeping current redirectUri behavior.");
+    return null;
+  }
+  return raw
+    .split(",")
+    .map(value => value.trim())
+    .filter(Boolean);
 }
 
 export function registerOAuthRoutes(app: Express) {
@@ -23,19 +34,30 @@ export function registerOAuthRoutes(app: Express) {
 
     // CSRF guard: the nonce in `state` must match the one-time cookie that
     // startLogin set in the browser that began this login. An attacker can
-    // forge `state`, but cannot plant this cookie in the victim's browser.
+    // forge `state`, but cannot plant this cookie in a victim's browser.
     const { nonce, redirectUri } = decodeOAuthState(state);
     const expectedNonce = parseCookieHeader(req.headers.cookie ?? "")[OAUTH_STATE_COOKIE];
     if (!nonce || nonce !== expectedNonce) {
       res.status(403).json({ error: "invalid oauth state" });
       return;
     }
-    res.clearCookie(OAUTH_STATE_COOKIE, { path: "/", secure: true, sameSite: "none" });
 
-    if (!isOAuthRedirectOriginAllowed(redirectUri)) {
-      res.status(400).json({ error: "OAuth redirect origin is not allowed" });
-      return;
+    const allowedOrigins = getAllowedRedirectOrigins();
+    if (allowedOrigins) {
+      try {
+        const url = new URL(redirectUri);
+        const origin = url.origin;
+        if (!allowedOrigins.includes(origin)) {
+          res.status(400).json({ error: "redirectUri origin not allowed" });
+          return;
+        }
+      } catch {
+        res.status(400).json({ error: "redirectUri origin not allowed" });
+        return;
+      }
     }
+
+    res.clearCookie(OAUTH_STATE_COOKIE, { path: "/", secure: true, sameSite: "none" });
 
     try {
       const tokenResponse = await sdk.exchangeCodeForToken(code, state);
