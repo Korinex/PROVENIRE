@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
+import { prependActivity } from "./_core/activity";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
@@ -98,6 +99,7 @@ type DemoState = {
   conflicts: Conflict[];
   network: { id: string; name: string; status: "healthy" | "unavailable"; headHash: string; checkedAt: string }[];
   activity: { id: string; label: string; detail: string; tone: "neutral" | "good" | "warning" | "danger"; occurredAt: string }[];
+  activitySequence: number;
 };
 
 const organizations: Organization[] = [
@@ -131,7 +133,8 @@ function proofFor(state: DemoState, type: string, actorId: string, occurredAt: s
 }
 
 function addActivity(state: DemoState, label: string, detail: string, tone: DemoState["activity"][number]["tone"]) {
-  state.activity.unshift({ id: `activity-${state.activity.length + 1}`, label, detail, tone, occurredAt: now() });
+  state.activitySequence += 1;
+  prependActivity(state.activity, { id: `activity-${state.activitySequence}`, label, detail, tone, occurredAt: now() });
 }
 
 function addEvent(state: DemoState, type: Event["type"], label: string, actorId: string, payload: Record<string, unknown>, occurredAt = now()) {
@@ -189,6 +192,7 @@ function makeInitialState(): DemoState {
       checkedAt: now(),
     })),
     activity: [] as DemoState["activity"],
+    activitySequence: 0,
   } satisfies DemoState;
 
   addEvent(state, "origin", "Origin signed", "medsure-labs", {
