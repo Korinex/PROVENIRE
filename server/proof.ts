@@ -60,23 +60,6 @@ export function canonicalJson(value: unknown): string {
   }
   return serialized;
 }
-
-<<<<<<< HEAD
-export function buildReceiptPayload(
-  dispatchRecordHash: string,
-  receiptFields: Record<string, JsonValue>,
-): Record<string, JsonValue> {
-  if (!/^[a-f0-9]{64}$/i.test(dispatchRecordHash)) {
-    throw new TypeError("dispatchRecordHash must be a SHA-256 hex digest.");
-  }
-  if (Object.hasOwn(receiptFields, "dispatchRecordHash")) {
-    throw new TypeError("dispatchRecordHash is set by the proof module.");
-  }
-  return { ...receiptFields, dispatchRecordHash };
-}
-
-=======
->>>>>>> 9ffc937 (Add standalone signed proof chain primitives)
 export function createProofKeyring(
   organizationIds: readonly string[] = PROOF_ORGANIZATIONS,
 ): ProofKeyring {
