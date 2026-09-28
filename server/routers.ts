@@ -9,6 +9,9 @@ import { TRPCError } from "@trpc/server";
 type OrgRole = "manufacturer" | "distributor" | "hospital_pharmacy";
 type HandoffState = "receiver_pending" | "accepted" | "needs_review";
 
+const MAX_QUANTITY = 1_000_000;
+const ROUTE = ["medsure-labs", "central-pharma", "ramdeobaba-pharmacy"] as const;
+
 type Organization = { id: string; name: string; role: OrgRole; shortRole: string };
 type Proof = {
   recordHash: string;
@@ -58,6 +61,8 @@ type Conflict = {
   expectedValue: number;
   observedValue: number;
   delta: number;
+  variance: number;
+  direction: "shortage" | "overage";
   status: "open" | "resolved";
   createdAt: string;
 };
@@ -124,19 +129,31 @@ function proofFor(state: DemoState, type: string, actorId: string, payload: Reco
   };
 }
 
+function validateQuantity(value: number, fieldName: string) {
+  if (!Number.isInteger(value) || value <= 0 || value > MAX_QUANTITY) {
+    throw new TRPCError({ code: "BAD_REQUEST", message: `${fieldName} must be a positive integer no greater than ${MAX_QUANTITY}.` });
+  }
+}
+
 function addActivity(state: DemoState, label: string, detail: string, tone: DemoState["activity"][number]["tone"]) {
   state.activity.unshift({ id: `activity-${state.activity.length + 1}`, label, detail, tone, occurredAt: now() });
+  if (state.activity.length > 200) state.activity = state.activity.slice(0, 200);
 }
 
 function addEvent(state: DemoState, type: Event["type"], label: string, actorId: string, payload: Record<string, unknown>) {
+  const eventTime = now();
+  const payloadWithTime = { ...payload };
+  const timestampKey = "observedAt" in payloadWithTime ? "observedAt" : "occurredAt";
+  payloadWithTime[timestampKey] = eventTime;
+
   const event: Event = {
     id: `event-${state.events.length + 1}`,
     type,
     label,
     actorId,
-    occurredAt: now(),
-    payload,
-    proof: proofFor(state, type, actorId, payload),
+    occurredAt: eventTime,
+    payload: payloadWithTime,
+    proof: proofFor(state, type, actorId, payloadWithTime),
   };
   state.events.push(event);
   return event;
@@ -203,20 +220,40 @@ function refreshNodeHeads(current: DemoState) {
   current.network = current.network.map(node => ({ ...node, headHash, checkedAt: now() }));
 }
 
-function createDispatch(current: DemoState, receiverId: string) {
-  if (!current.batch.onwardDispatchAllowed) {
+function getExpectedReceiverId(current: DemoState): string | undefined {
+  if (current.batch.acceptedHandoffs >= ROUTE.length - 1) return undefined;
+  return ROUTE[current.batch.acceptedHandoffs + 1];
+}
+
+function createDispatch(current: DemoState, receiverId: string, quantityOverride?: number) {
+  if (current.batch.conflictState === "open") {
     throw new TRPCError({ code: "CONFLICT", message: "Next dispatch is blocked pending resolution or route completion." });
   }
   if (current.batch.activeDispatchId) {
     throw new TRPCError({ code: "CONFLICT", message: "A receiver-pending handoff already requires a receipt." });
+  }
+  if (current.batch.acceptedHandoffs >= ROUTE.length - 1) {
+    throw new TRPCError({ code: "CONFLICT", message: "All handoffs for this route are complete." });
+  }
+  if (current.batch.currentHolderId !== ROUTE[current.batch.acceptedHandoffs]) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Only the current holder can dispatch the next route handoff." });
+  }
+  const expectedReceiverId = getExpectedReceiverId(current);
+  if (!expectedReceiverId) {
+    throw new TRPCError({ code: "CONFLICT", message: "All handoffs for this route are complete." });
+  }
+  if (receiverId !== expectedReceiverId) {
+    throw new TRPCError({ code: "FORBIDDEN", message: `Expected next receiver is ${orgName(current, expectedReceiverId)}, not ${orgName(current, receiverId)}.` });
   }
   const receiver = current.organizations.find(org => org.id === receiverId);
   if (!receiver) throw new TRPCError({ code: "NOT_FOUND", message: "Receiver organization not found." });
   if (receiverId === current.batch.currentHolderId) {
     throw new TRPCError({ code: "UNPROCESSABLE_CONTENT", message: "Sender and receiver must be different organizations." });
   }
+  const quantity = quantityOverride ?? current.batch.acceptedForOnwardCustody;
+  validateQuantity(quantity, "dispatch quantity");
   const id = `dispatch-${current.dispatches.length + 1}`;
-  const quantity = current.batch.acceptedForOnwardCustody;
+  const timestamp = now();
   const payload = {
     type: "dispatch",
     batchId: current.batch.batchNumber,
@@ -225,8 +262,9 @@ function createDispatch(current: DemoState, receiverId: string) {
     quantityDispatched: quantity,
     unit: current.batch.unit,
     location: orgName(current, current.batch.currentHolderId),
+    occurredAt: timestamp,
   };
-  const event = addEvent(current, "dispatch", "Sender dispatch signed", current.batch.currentHolderId, payload);
+  const event = addEvent(current, "dispatch", "Sender dispatch signed", current.batch.currentHolderId, payload, timestamp);
   const dispatch: Dispatch = {
     id,
     batchId: current.batch.id,
@@ -262,9 +300,11 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
   }
   const receiver = current.organizations.find(org => org.id === receiverId);
   if (!receiver) throw new TRPCError({ code: "NOT_FOUND", message: "Receiver organization not found." });
+  validateQuantity(observedQuantity, "receiverObservedQuantity");
   const variance = Math.abs(dispatch.dispatchedQuantity - observedQuantity);
   const status: HandoffState = variance === 0 ? "accepted" : "needs_review";
   const id = `receipt-${current.receipts.length + 1}`;
+  const timestamp = now();
   const payload = {
     type: "receipt",
     dispatchId,
@@ -273,9 +313,9 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
     receiverObservedQuantity: observedQuantity,
     unit: current.batch.unit,
     location: receiver.name,
-    observedAt: now(),
+    observedAt: timestamp,
   };
-  const event = addEvent(current, "receipt", "Receiver receipt signed", receiverId, payload);
+  const event = addEvent(current, "receipt", "Receiver receipt signed", receiverId, payload, timestamp);
   const receipt: Receipt = {
     id,
     dispatchId,
@@ -303,8 +343,8 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
     current.batch.quantityState = "consistent";
     current.batch.conflictState = "none";
     current.batch.acceptedHandoffs += 1;
-    current.batch.routeCoverageState = current.batch.acceptedHandoffs >= 2 ? "complete" : "incomplete";
-    current.batch.onwardDispatchAllowed = current.batch.acceptedHandoffs < 2;
+    current.batch.routeCoverageState = current.batch.acceptedHandoffs >= ROUTE.length - 1 ? "complete" : "incomplete";
+    current.batch.onwardDispatchAllowed = current.batch.acceptedHandoffs < ROUTE.length - 1;
     addActivity(current, "Handoff accepted", `${receiver.name} confirmed ${observedQuantity} units`, "good");
   } else {
     current.batch.quantityState = "discrepant";
@@ -320,6 +360,7 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
       expectedValue: dispatch.dispatchedQuantity,
       observedValue: observedQuantity,
       delta: variance,
+      direction: observedQuantity < dispatch.dispatchedQuantity ? "shortage" : "overage",
       status: "open",
       createdAt: event.occurredAt,
     };
@@ -433,7 +474,7 @@ export const appRouter = router({
         return snapshot(state);
       }),
     receipt: publicProcedure
-      .input(z.object({ dispatchId: z.string(), receiverId: z.string(), receiverObservedQuantity: z.number().int().min(0) }))
+      .input(z.object({ dispatchId: z.string(), receiverId: z.string(), receiverObservedQuantity: z.number().int().positive().max(MAX_QUANTITY) }))
       .mutation(({ input }) => {
         createReceipt(state, input.dispatchId, input.receiverId, input.receiverObservedQuantity);
         return snapshot(state);

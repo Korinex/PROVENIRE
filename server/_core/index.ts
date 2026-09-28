@@ -9,6 +9,28 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 
+async function addHelmetIfAvailable(app: express.Express) {
+  try {
+    const { default: helmet } = await import("helmet");
+    app.use(
+      helmet({
+        contentSecurityPolicy: false,
+      })
+    );
+  } catch {
+    console.warn("[Security] helmet is not installed; skipping security middleware.");
+  }
+}
+
+export function assertRequiredEnv() {
+  if (process.env.NODE_ENV === "test") return;
+  const required = ["JWT_SECRET"] as const;
+  const missing = required.filter(key => !process.env[key] || !process.env[key]!.trim());
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
+  }
+}
+
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
     const server = net.createServer();
@@ -28,12 +50,16 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
   throw new Error(`No available port found starting from ${startPort}`);
 }
 
-async function startServer() {
+export async function startServer(portOverride?: number) {
+  assertRequiredEnv();
   const app = express();
+  await addHelmetIfAvailable(app);
   const server = createServer(app);
-  // Configure body parser with larger size limit for file uploads
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  app.get("/healthz", (_req, res) => {
+    res.status(200).json({ status: "ok", uptime: process.uptime() });
+  });
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: true }));
   registerStorageProxy(app);
   registerOAuthRoutes(app);
   // tRPC API
@@ -51,16 +77,24 @@ async function startServer() {
     serveStatic(app);
   }
 
-  const preferredPort = parseInt(process.env.PORT || "3000");
-  const port = await findAvailablePort(preferredPort);
+  const preferredPort = portOverride ?? parseInt(process.env.PORT || "3000");
+  const port = portOverride ?? (await findAvailablePort(preferredPort));
 
   if (port !== preferredPort) {
     console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
   }
 
-  server.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}/`);
+  await new Promise<void>((resolve, reject) => {
+    server.listen(port, () => {
+      console.log(`Server running on http://localhost:${port}/`);
+      resolve();
+    });
+    server.on("error", reject);
   });
+
+  return server;
 }
 
-startServer().catch(console.error);
+if (process.env.NODE_ENV !== "test") {
+  startServer().catch(console.error);
+}
