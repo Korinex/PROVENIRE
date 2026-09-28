@@ -44,6 +44,26 @@ describe("Provenire custody protocol", () => {
     expect(state.batch.acceptedForOnwardCustody).toBe(0);
     expect(state.batch.onwardDispatchAllowed).toBe(false);
     expect(state.conflicts[0]?.status).toBe("open");
+    expect(state.batch.currentHolder).toBe("MedSure Labs");
+    expect(state.batch.acceptedHandoffs).toBe(0);
+    expect(state.dispatches).toHaveLength(1);
+    expect(state.receipts).toHaveLength(1);
+    expect(state.conflicts[0]).toMatchObject({
+      expectedValue: 1000,
+      observedValue: 950,
+      delta: 50,
+      direction: "shortage",
+      dispatchId: state.dispatches[0]?.id,
+      receiptId: state.receipts[0]?.id,
+      status: "open",
+    });
+    expect(state.conflicts[0]?.createdAt).toBe(state.receipts[0]?.observedAt);
+    expect(state.activity.some(item => item.label === "Quantity discrepancy")).toBe(true);
+    await expect(api.provenire.receipt({
+      dispatchId: state.dispatches[0]!.id,
+      receiverId: "central-pharma",
+      receiverObservedQuantity: 950,
+    })).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it("returns a truthful public verifier projection", async () => {
@@ -54,9 +74,12 @@ describe("Provenire custody protocol", () => {
     expect(state.publicVerifier.physicalAuthenticityProven).toBe(false);
     expect("privateKey" in state.publicVerifier).toBe(false);
     const publicJson = JSON.stringify(state.publicVerifier);
-    for (const privateField of ["senderId", "receiverId", "payload", "canonical", "privateKey"]) {
-      expect(publicJson).not.toContain(privateField);
+    const publicKeys = Object.keys(state.publicVerifier);
+    for (const privateField of ["senderId", "receiverId", "payload", "canonical", "privateKey", "signature", "recordHash", "dispatches", "receipts", "events"]) {
+      expect(publicKeys).not.toContain(privateField);
     }
+    expect(publicJson).not.toContain("Central Pharma Distributor");
+    expect(publicJson).not.toContain("Ramdeobaba Hospital Pharmacy");
     expect(publicJson).not.toContain("1000");
     expect(publicJson).not.toContain("950");
   });
@@ -93,11 +116,15 @@ describe("Provenire custody protocol", () => {
     const api = caller();
     await api.provenire.reset();
 
+    await expect(api.provenire.dispatch({ receiverId: "not-an-organization" })).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(api.provenire.dispatch({ receiverId: "ramdeobaba-pharmacy" })).rejects.toMatchObject({ code: "UNPROCESSABLE_CONTENT" });
     await expect(api.provenire.dispatch({ receiverId: "medsure-labs" })).rejects.toMatchObject({ code: "UNPROCESSABLE_CONTENT" });
 
     const first = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    expect(first.dispatches[0]?.senderId).toBe(first.batch.currentHolderId);
+    await expect(api.provenire.receipt({ dispatchId: first.batch.activeDispatchId!, receiverId: "ramdeobaba-pharmacy", receiverObservedQuantity: 1000 })).rejects.toMatchObject({ code: "FORBIDDEN" });
     await api.provenire.receipt({ dispatchId: first.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 });
+    await expect(api.provenire.receipt({ dispatchId: first.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 })).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(api.provenire.dispatch({ receiverId: "medsure-labs" })).rejects.toMatchObject({ code: "UNPROCESSABLE_CONTENT" });
     await expect(api.provenire.dispatch({ receiverId: "central-pharma" })).rejects.toMatchObject({ code: "UNPROCESSABLE_CONTENT" });
   });
@@ -152,6 +179,29 @@ describe("Provenire custody protocol", () => {
     for (const event of state.events) {
       expect(event.payload.occurredAt).toBe(event.occurredAt);
       if (event.type === "receipt") expect(event.payload.observedAt).toBe(event.occurredAt);
+    }
+    for (const dispatch of state.dispatches) {
+      const event = state.events.find(item => item.proof.recordHash === dispatch.proof.recordHash);
+      expect(dispatch.occurredAt).toBe(event?.occurredAt);
+    }
+    for (const receipt of state.receipts) {
+      const event = state.events.find(item => item.proof.recordHash === receipt.proof.recordHash);
+      expect(receipt.observedAt).toBe(event?.occurredAt);
+    }
+    expect(state.activity.length).toBeLessThanOrEqual(12);
+    expect(new Set(state.activity.map(item => item.id)).size).toBe(state.activity.length);
+  });
+
+  it("completes three clean routes when each run starts fresh", async () => {
+    const api = caller();
+    for (let run = 0; run < 3; run += 1) {
+      const state = await api.provenire.runHappyPath();
+      expect(state.batch.handoffState).toBe("accepted");
+      expect(state.batch.acceptedHandoffs).toBe(2);
+      expect(state.dispatches).toHaveLength(2);
+      expect(state.dispatches[1]?.senderId).toBe("central-pharma");
+      expect(state.receipts).toHaveLength(2);
+      expect(state.batch.onwardDispatchAllowed).toBe(false);
     }
   });
 });

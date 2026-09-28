@@ -8,3 +8,12 @@ export const ENV = {
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
 };
+
+export function assertJwtSecretConfigured(
+  nodeEnv = process.env.NODE_ENV,
+  jwtSecret = process.env.JWT_SECRET,
+) {
+  if (nodeEnv !== "test" && !jwtSecret?.trim()) {
+    throw new Error("JWT_SECRET must be configured outside test mode.");
+  }
+}

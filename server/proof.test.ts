@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildReceiptPayload,
   canonicalJson,
   cloneWithEventMutation,
   createProofKeyring,
@@ -42,7 +43,7 @@ function makeValidChain() {
     actorOrgId: "central-pharma",
     occurredAt: "2026-09-28T12:10:00.000Z",
     previousHash: dispatch.recordHash,
-    payload: { dispatchRecordHash: dispatch.recordHash, receiverObservedQuantity: 1000 },
+    payload: buildReceiptPayload(dispatch.recordHash, { receiverObservedQuantity: 1000 }),
   });
 
   return [origin, dispatch, receipt];
@@ -99,6 +100,16 @@ describe("Provenire proof primitives", () => {
     }));
 
     expect(verifyChain(changedReceipt, keyring).events[2]).toMatchObject({ hashOk: false, sigOk: false });
+  });
+
+  it("builds receipt payloads with an immutable SHA-256 dispatch link", () => {
+    const dispatchRecordHash = "a".repeat(64);
+    expect(buildReceiptPayload(dispatchRecordHash, { receiverObservedQuantity: 950 })).toEqual({
+      receiverObservedQuantity: 950,
+      dispatchRecordHash,
+    });
+    expect(() => buildReceiptPayload("not-a-hash", {})).toThrow("SHA-256");
+    expect(() => buildReceiptPayload(dispatchRecordHash, { dispatchRecordHash })).toThrow("set by the proof module");
   });
 
   it("rejects invalid signatures and unknown actors", () => {
