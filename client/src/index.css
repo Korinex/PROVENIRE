@@ -85,8 +85,6 @@ button,input { font:inherit; } button { cursor:pointer; color:inherit; } button:
 @media(max-width:1080px){.app-shell{width:calc(100% - 270px);margin-left:238px}.metrics-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.content-grid{grid-template-columns:minmax(0,1fr)}.side-column{grid-template-columns:repeat(3,minmax(0,1fr))}.security-note{display:none}}
 @media(max-width:760px){.proof-rail{position:relative;width:100%;height:auto;border-right:0;border-bottom:1px solid var(--line);padding:16px 18px}.rail-brand{margin-bottom:12px}.rail-rule,.rail-caption,.rail-bottom{display:none}.rail-links{display:flex;gap:5px;margin:0;overflow-x:auto}.rail-links button{width:auto;white-space:nowrap}.app-header{margin-left:0;height:62px;padding:0 18px}.topbar-context .mono,.topbar-separator{display:none}.app-shell{width:calc(100% - 28px);margin:0 auto;padding-top:36px}.hero-row{display:block;min-height:auto;padding-top:10px}.hero-proof{max-width:none;margin-top:30px}.demo-explainer-head{display:block}.demo-tip{min-width:0;margin-top:16px;border-left:0;border-top:1px solid var(--line);padding:14px 0 0}.demo-steps{grid-template-columns:1fr}.metrics-grid{grid-template-columns:1fr 1fr;gap:8px}.metric-card{padding:12px}.metric-card .truncate{font-size:15px}.side-column{grid-template-columns:1fr}.route-line{overflow-x:auto}.route-connector{min-width:42px}.route-name{font-size:11px}.public-details{grid-template-columns:repeat(2,minmax(0,1fr))}.assurance-grid{grid-template-columns:1fr 1fr}.app-footer{display:block}.app-footer>div+div{margin-top:8px}}
 @media(max-width:480px){.hero-row h1{font-size:54px}.metrics-grid{grid-template-columns:1fr}.section-heading{align-items:flex-start;flex-direction:column}.public-card-top{display:block}.qr-placeholder{margin-bottom:16px}.assurance-grid{grid-template-columns:1fr}}
-<<<<<<< HEAD
-=======
 
 body { background:var(--bg); color:var(--white); }
 ::selection { background:rgba(47,99,224,.18); color:#14224a; }
@@ -346,4 +344,4 @@ body { font-size:14px; line-height:1.5; font-weight:400; }
 	.integrity-alert-tag { display:none; }
 	.participant-avatar { height:32px; width:32px; flex-basis:32px; }
 }
->>>>>>> 7fb714f (Align dashboard shell and highlight tampered records)
+
