@@ -271,10 +271,76 @@ body { font-size:14px; line-height:1.5; font-weight:400; }
 	.route-connector-active::after { animation:none; left:50%; }
 }
 
+.app-header {
+	position:sticky;
+	top:0;
+	z-index:40;
+	display:grid;
+	grid-template-columns:190px minmax(0,1fr) auto;
+	gap:22px;
+	height:76px;
+	margin:0;
+	border:0;
+	border-bottom:1px solid rgba(20,34,74,.1);
+	border-radius:0 0 12px 12px;
+	background:rgba(255,255,255,.96);
+	padding:0 28px;
+	box-shadow:0 4px 18px rgba(20,34,74,.055);
+	backdrop-filter:blur(14px);
+}
+.topbar-brand { display:flex; min-width:0; align-items:center; gap:10px; border:0; background:none; padding:0; color:#14224a; text-align:left; }
+.topbar-brand-mark { display:grid; height:34px; width:34px; flex:none; place-items:center; border:1px solid rgba(47,99,224,.2); border-radius:8px; background:#eef3ff; color:#2f63e0; }
+.topbar-brand strong,.topbar-brand small { display:block; }
+.topbar-brand strong { font:600 13px 'Space Grotesk',sans-serif; letter-spacing:.1em; }
+.topbar-brand small { margin-top:3px; color:#52627e; font:600 9px 'IBM Plex Sans',sans-serif; letter-spacing:.08em; }
+.topbar-context { min-width:0; }
+.topbar-actions { display:flex; align-items:center; gap:10px; }
+.proof-rail { position:fixed; inset:88px auto 12px 12px; width:190px; border:0; border-radius:12px; background:linear-gradient(180deg,#2f63e0 0%,#2855c0 100%); padding:20px 12px; box-shadow:0 12px 28px rgba(31,63,142,.2); backdrop-filter:none; }
+.proof-rail .rail-caption { color:#e8efff; font-size:10px; letter-spacing:.1em; }
+.proof-rail .rail-links { gap:5px; margin-top:12px; }
+.proof-rail .rail-links button { min-height:42px; border-radius:8px; color:#e8efff; font-size:13px; font-weight:500; }
+.proof-rail .rail-links button:hover,.proof-rail .rail-links button.active { border-color:rgba(255,255,255,.28); background:rgba(255,255,255,.16); color:#fff; }
+.proof-rail .rail-links button.active svg { color:#fff; }
+.proof-rail .rail-bottom { border-color:rgba(255,255,255,.22); }
+.proof-rail .rail-live { background:#81e3b1; box-shadow:0 0 0 4px rgba(129,227,177,.16); }
+.app-shell { width:min(1180px,calc(100vw - 274px)); margin-left:calc(202px + max(36px,(100vw - 202px - 1180px)/2)); margin-right:36px; padding-top:34px; }
+.participant-avatar { display:grid; height:32px; width:32px; flex:0 0 32px; place-items:center; border:1px solid rgba(47,99,224,.2); border-radius:8px; background:#eef3ff; color:#244fb8; font-size:11px; font-weight:700; line-height:1; }
+.participant { align-items:center; min-height:38px; }
 .proof-badge { display:inline-flex; align-items:center; gap:6px; border:1px solid transparent; border-radius:999px; padding:4px 8px; font-size:11px; line-height:1.25; font-weight:600; }
 .proof-badge-valid { border-color:rgba(15,116,92,.16); background:#eaf6f2; color:#126a5a; }
 .proof-badge-invalid { border-color:rgba(188,39,51,.2); background:#fff0f0; color:#a51f2b; }
-.proof-badge-dot { width:6px; height:6px; flex:0 0 auto; border-radius:50%; background:currentColor; }
-.handoff-integrity-failed { border-color:rgba(188,39,51,.48); box-shadow:0 0 0 1px rgba(188,39,51,.1),0 4px 18px rgba(20,34,74,.055); }
-.timeline-row-integrity-failed { border-bottom-color:rgba(188,39,51,.18); background:linear-gradient(90deg,#fff5f5,transparent 75%); }
-.timeline-dot-failed { background:#c8323e; box-shadow:0 0 0 4px rgba(200,50,62,.12); }
+.proof-badge-dot { height:6px; width:6px; flex:0 0 auto; border-radius:50%; background:currentColor; }
+.integrity-alert { display:flex; align-items:center; gap:12px; margin:0 0 18px; border:1px solid rgba(188,39,51,.26); border-left:5px solid #c8323e; border-radius:9px; background:#fff1f2; padding:13px 16px; color:#5b1f25; box-shadow:0 4px 16px rgba(188,39,51,.08); }
+.integrity-alert-icon { display:grid; height:34px; width:34px; flex:none; place-items:center; border-radius:8px; background:#ffe0e2; color:#b42330; }
+.integrity-alert strong { display:block; color:#8d1f29; font-size:14px; font-weight:700; }
+.integrity-alert p { margin:3px 0 0; color:#652c31; font-size:12px; line-height:1.45; }
+.integrity-alert-tag { margin-left:auto; flex:none; border:1px solid rgba(188,39,51,.22); border-radius:5px; background:#fff; padding:5px 7px; color:#9e2630; font-size:9px; font-weight:700; letter-spacing:.07em; }
+.integrity-tampered .metrics-grid .metric-card:last-child { border-color:rgba(188,39,51,.4); background:#fff3f3; box-shadow:inset 3px 0 #c8323e,0 4px 18px rgba(20,34,74,.055); }
+.integrity-tampered .batch-summary { border-color:rgba(188,39,51,.38); box-shadow:0 0 0 1px rgba(188,39,51,.08),0 4px 18px rgba(20,34,74,.055); }
+.integrity-tampered .timeline-row { border-bottom-color:rgba(188,39,51,.18); background:linear-gradient(90deg,#fff5f5,transparent 75%); }
+.integrity-tampered .timeline-dot,.timeline-dot-failed { background:#c8323e; box-shadow:0 0 0 4px rgba(200,50,62,.12); }
+.integrity-tampered .handoff-card,.integrity-flagged { border-color:rgba(188,39,51,.48); box-shadow:0 0 0 1px rgba(188,39,51,.1),0 4px 18px rgba(20,34,74,.055); }
+.integrity-tampered .data-cell:last-child,.integrity-proof-cell { border-color:rgba(188,39,51,.32); background:#fff3f3; }
+
+@media(min-width:761px) and (max-width:1080px) {
+	.proof-rail { inset:88px auto 12px 12px; }
+	.app-shell { width:calc(100vw - 262px); margin:0 24px 0 238px; }
+	.content-grid { grid-template-columns:minmax(0,1fr); }
+}
+
+@media(max-width:760px) {
+	.app-header { grid-template-columns:minmax(0,1fr) auto; gap:10px; min-height:68px; height:auto; padding:10px 14px; }
+	.topbar-context { display:none; }
+	.topbar-actions { gap:7px; }
+	.topbar-actions .ghost-button,.topbar-actions .primary-button { min-height:38px; padding:8px 10px; }
+	.proof-rail { position:relative; inset:auto; display:block; width:calc(100% - 24px); height:auto; margin:10px 12px; border-radius:10px; padding:9px 10px; }
+	.proof-rail .rail-caption,.proof-rail .rail-bottom { display:none; }
+	.proof-rail .rail-links { display:flex; gap:4px; margin:0; overflow-x:auto; scrollbar-width:none; }
+	.proof-rail .rail-links::-webkit-scrollbar { display:none; }
+	.proof-rail .rail-links button { width:auto; flex:0 0 auto; min-height:38px; padding:8px 10px; white-space:nowrap; font-size:12px; }
+	.app-shell { width:calc(100vw - 28px); margin:0 14px; padding:20px 0 28px; }
+	.mobile-nav { display:none; }
+	.integrity-alert { align-items:flex-start; padding:12px; }
+	.integrity-alert-tag { display:none; }
+	.participant-avatar { height:32px; width:32px; flex-basis:32px; }
+}
