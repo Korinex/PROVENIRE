@@ -114,16 +114,12 @@ function AppHeader({ active, setActive, onReset, onRunHappy, onRunMismatch, busy
     { id: "network", label: "Network verify", icon: Network },
     { id: "public", label: "Public verifier", icon: Eye },
   ];
-  return <>
-    <aside className="proof-rail">
-      <button className="rail-brand" onClick={() => setActive("overview")}><span className="rail-logo"><FlaskConical size={18} /></span><span className="rail-brand-copy"><strong>PROVENIRE</strong><small>SUPPLY NETWORK</small></span></button>
-      <div className="rail-rule" />
-      <div className="rail-caption">PROOF WORKSPACE</div>
-      <div className="rail-links">{nav.map(item => <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><item.icon size={15} /><span>{item.label}</span></button>)}</div>
-      <div className="rail-bottom"><span className="rail-live" /><span className="rail-caption">LIVE<br />PROOF</span></div>
-    </aside>
-    <header className="app-header"><div className="topbar-context"><span className="live"><i />LIVE PROTOTYPE</span><span className="topbar-separator" /><span className="mono">MS-2026-001 · SHA-256</span></div><div className="ml-auto flex items-center gap-2"><button className="ghost-button" onClick={onReset}><RotateCcw size={14} />Reset</button><div className="relative group"><button className="primary-button compact" disabled={busy}><PlayIcon />Run demo</button><div className="demo-menu"><button onClick={onRunHappy}><CheckCircle2 size={14} />Run clean route</button><button onClick={onRunMismatch}><AlertTriangle size={14} />Run 1,000 → 950 mismatch</button></div></div></div></header>
-  </>;
+  return <header className="app-header">
+    <button className="rail-brand" onClick={() => setActive("overview")} aria-label="Open Provenire overview"><span className="rail-logo"><FlaskConical size={18} /></span><span className="rail-brand-copy"><strong>PROVENIRE</strong><small>VERIFIED CUSTODY</small></span></button>
+    <nav className="desktop-nav" aria-label="Primary navigation">{nav.map(item => <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><item.icon size={15} /><span>{item.label}</span></button>)}</nav>
+    <div className="topbar-context"><span className="live"><i />LIVE PROTOTYPE</span><span className="topbar-separator" /><span className="mono">MS-2026-001 · SHA-256</span></div>
+    <div className="header-actions"><button className="ghost-button" onClick={onReset}><RotateCcw size={14} />Reset demo</button><div className="relative group"><button className="primary-button compact" disabled={busy}><PlayIcon /><span>Run demo</span></button><div className="demo-menu"><button onClick={onRunHappy}><CheckCircle2 size={14} />Run clean route</button><button onClick={onRunMismatch}><AlertTriangle size={14} />Run 1,000 → 950 mismatch</button></div></div></div>
+  </header>;
 }
 function PlayIcon() { return <span className="play-icon"><span /></span>; }
 
@@ -157,8 +153,10 @@ export default function Home() {
       ? `Current holder · ${state.batch.currentHolder}`
       : "Current holder · backend-derived";
 
-  return <ChainIntegrityContext.Provider value={integrityValid}><div className="min-h-screen bg-[#08111f] text-slate-100"><AppHeader active={active} setActive={setActive} onReset={() => runAction(reset)} onRunHappy={() => runAction(happy)} onRunMismatch={() => runAction(mismatch)} busy={busy} />
+  const tampered = state.batch.recordIntegrityState === "tampered";
+  return <ChainIntegrityContext.Provider value={integrityValid}><div className={cn("min-h-screen provenire-app", tampered && "is-tampered")}><AppHeader active={active} setActive={setActive} onReset={() => runAction(reset)} onRunHappy={() => runAction(happy)} onRunMismatch={() => runAction(mismatch)} busy={busy} />
     <div className="mobile-nav lg:hidden">{(["overview", "handoffs", "conflicts", "network", "public"] as Panel[]).map(panel => <button key={panel} className={cn(active === panel && "mobile-nav-active")} onClick={() => setActive(panel)}>{panel.replace("public", "public verifier")}</button>)}</div>
+    {tampered && <div className="tamper-banner" role="alert"><ShieldAlert size={18} /><div><strong>Record integrity compromised</strong><span>A signed field has changed. Hash and signature verification are invalid.</span></div><span className="tamper-banner-tag">TAMPERED</span></div>}
     <main className={cn("app-shell", active !== "overview" && "interior-page")}>
       <section className="hero-row"><div><div className="eyebrow text-cyan-300">Live demo workspace <span className="live-dot" /></div><h1>Make every handoff<br /><span>inspectable.</span></h1><p className="hero-copy">A sender-signed dispatch is not the same as a receiver-signed receipt. Provenire keeps both visible, so a mismatch cannot silently become accepted custody.</p></div><div className="hero-proof"><div className="flex items-center gap-3"><div className="proof-seal"><ShieldCheck size={22} /></div><div><div className="eyebrow">Prototype assurance</div><div className="mt-1 text-sm font-semibold text-white">Signed record history</div></div></div><div className="mt-5 grid grid-cols-2 gap-3"><div><div className="text-2xl font-semibold text-white">{state.batch.acceptedHandoffs}/2</div><div className="text-[11px] uppercase tracking-wider text-slate-500">handoffs accepted</div></div><div><div className="text-2xl font-semibold text-cyan-300">{state.batch.networkState === "agreement" ? "3/3" : "2/3"}</div><div className="text-[11px] uppercase tracking-wider text-slate-500">nodes verifying</div></div></div></div></section>
       {actionMessage && <div className="action-toast"><CheckCircle2 size={15} className="text-cyan-300" />{actionMessage}<button onClick={() => setActionMessage("")}>×</button></div>}
