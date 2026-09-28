@@ -114,12 +114,16 @@ function AppHeader({ active, setActive, onReset, onRunHappy, onRunMismatch, busy
     { id: "network", label: "Network verify", icon: Network },
     { id: "public", label: "Public verifier", icon: Eye },
   ];
-  return <header className="app-header">
-    <button className="rail-brand" onClick={() => setActive("overview")} aria-label="Open Provenire overview"><span className="rail-logo"><FlaskConical size={18} /></span><span className="rail-brand-copy"><strong>PROVENIRE</strong><small>VERIFIED CUSTODY</small></span></button>
-    <nav className="desktop-nav" aria-label="Primary navigation">{nav.map(item => <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><item.icon size={15} /><span>{item.label}</span></button>)}</nav>
-    <div className="topbar-context"><span className="live"><i />LIVE PROTOTYPE</span><span className="topbar-separator" /><span className="mono">MS-2026-001 · SHA-256</span></div>
-    <div className="header-actions"><button className="ghost-button" onClick={onReset}><RotateCcw size={14} />Reset demo</button><div className="relative group"><button className="primary-button compact" disabled={busy}><PlayIcon /><span>Run demo</span></button><div className="demo-menu"><button onClick={onRunHappy}><CheckCircle2 size={14} />Run clean route</button><button onClick={onRunMismatch}><AlertTriangle size={14} />Run 1,000 → 950 mismatch</button></div></div></div>
-  </header>;
+  return <>
+    <aside className="proof-rail">
+      <button className="rail-brand" onClick={() => setActive("overview")} aria-label="Open Provenire overview"><span className="rail-logo"><FlaskConical size={18} /></span><span className="rail-brand-copy"><strong>PROVENIRE</strong><small>VERIFIED CUSTODY</small></span></button>
+      <div className="rail-rule" />
+      <div className="rail-caption">CUSTODY WORKSPACE</div>
+      <nav className="rail-links" aria-label="Primary navigation">{nav.map(item => <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><item.icon size={15} /><span>{item.label}</span></button>)}</nav>
+      <div className="rail-bottom"><span className="rail-live" /><span className="rail-caption">LIVE<br />PROTOTYPE</span></div>
+    </aside>
+    <header className="app-header"><div className="topbar-context"><span className="live"><i />LIVE PROTOTYPE</span><span className="topbar-separator" /><span className="mono">MS-2026-001 · SHA-256</span></div><div className="header-actions"><button className="ghost-button" onClick={onReset}><RotateCcw size={14} />Reset demo</button><div className="relative group"><button className="primary-button compact" disabled={busy}><PlayIcon /><span>Run demo</span></button><div className="demo-menu"><button onClick={onRunHappy}><CheckCircle2 size={14} />Run clean route</button><button onClick={onRunMismatch}><AlertTriangle size={14} />Run 1,000 → 950 mismatch</button></div></div></div></header>
+  </>;
 }
 function PlayIcon() { return <span className="play-icon"><span /></span>; }
 
