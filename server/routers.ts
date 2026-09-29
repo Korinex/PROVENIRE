@@ -2,10 +2,12 @@ import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, router } from "./_core/trpc";
+import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { generateOrgKeys, sealEvent, verifyChain, chainIsValid } from "./proof/index";
 import type { EventBody as ProofEventBody, SealedEvent } from "./proof/seal";
+import { requireBatchParticipant } from "./access";
+import { getLocationFreshness, getLocationStatus, getRouteStatus, getVehicleStatus } from "./location";
 
 type OrgRole = "manufacturer" | "distributor" | "hospital_pharmacy";
 type HandoffState = "receiver_pending" | "accepted" | "needs_review";
@@ -544,6 +546,82 @@ function snapshot(current: DemoState) {
   };
 }
 
+function routeView(current: DemoState) {
+  const leg = current.transitLegs.find(item => item.status === "in_transit") ?? current.transitLegs.at(-1) ?? null;
+  const checkpointEvents = current.events.filter(event => event.type === "transit_checkpoint");
+  const custodyEvents = current.events.filter(event => event.type === "custody_location");
+  const lastCheckpoint = checkpointEvents.at(-1);
+  const lastCustody = custodyEvents.at(-1);
+  const lastLocationEvent = [lastCheckpoint, lastCustody].filter((event): event is Event => Boolean(event)).sort((first, second) => first.occurredAt.localeCompare(second.occurredAt)).at(-1);
+  const routeKey = leg ? `${leg.originLocationId}:${leg.destinationLocationId}` as keyof typeof CHECKPOINTS_BY_ROUTE : null;
+  const sequence = routeKey ? CHECKPOINTS_BY_ROUTE[routeKey] ?? [] : [];
+  const lastCheckpointId = lastCheckpoint?.payload.checkpointLabel
+    ? sequence.find(item => item.label === lastCheckpoint.payload.checkpointLabel)?.id
+    : undefined;
+  const nextIndex = lastCheckpointId ? sequence.findIndex(item => item.id === lastCheckpointId) + 1 : 0;
+  const currentLocation = leg?.lastCheckpointLocation
+    ? { ...leg.lastCheckpointLocation }
+    : lastCustody
+      ? { latitude: Number(lastCustody.payload.latitude), longitude: Number(lastCustody.payload.longitude), label: String(lastCustody.payload.locationLabel ?? "") }
+      : null;
+  const nextExpected = sequence[nextIndex] ?? null;
+  const lastReportAt = lastLocationEvent?.occurredAt ?? null;
+  const locationStatus = getLocationStatus(
+    currentLocation,
+    lastCheckpoint
+      ? currentLocation
+      : nextExpected
+        ? { latitude: nextExpected.latitude, longitude: nextExpected.longitude }
+        : currentLocation,
+    lastReportAt,
+    Boolean(lastCheckpoint),
+  );
+  const vehicleStatus = leg ? getVehicleStatus(leg.status, lastReportAt) : "not_started";
+  return {
+    batchNumber: current.batch.batchNumber,
+    facilities: current.facilities.map(({ id, name, role, latitude, longitude }) => ({ id, name, role, latitude, longitude })),
+    transitLegs: current.transitLegs.map(({ id, batchId, vehicleId, senderId, receiverId, originLocationId, destinationLocationId, status, startedAt, lastCheckpointAt, lastCheckpointLocation }) => ({ id, batchId, vehicleId, senderId, receiverId, originLocationId, destinationLocationId, status, startedAt, lastCheckpointAt, lastCheckpointLocation })),
+    checkpoints: checkpointEvents.map(event => ({
+      id: event.id,
+      occurredAt: event.occurredAt,
+      vehicleId: String(event.payload.vehicleId ?? ""),
+      label: String(event.payload.checkpointLabel ?? ""),
+      latitude: Number(event.payload.latitude),
+      longitude: Number(event.payload.longitude),
+    })),
+    currentLocation,
+    nextExpectedLocation: nextExpected ? { id: nextExpected.id, label: nextExpected.label, latitude: nextExpected.latitude, longitude: nextExpected.longitude } : null,
+    lastReportAt,
+    timeSinceLastReport: lastReportAt ? Math.max(0, Date.now() - Date.parse(lastReportAt)) : null,
+    locationStatus,
+    vehicleStatus,
+    routeStatus: getRouteStatus(vehicleStatus, locationStatus),
+  };
+}
+
+function locationTraceView(current: DemoState) {
+  const route = routeView(current);
+  const lastCustody = current.events.filter(event => event.type === "custody_location").at(-1);
+  const leg = current.transitLegs.find(item => item.status === "in_transit") ?? current.transitLegs.at(-1) ?? null;
+  const destination = leg ? facilityFor(current, leg.destinationLocationId) ?? null : null;
+  return {
+    ...route,
+    lastConfirmedFacility: lastCustody ? {
+      id: String(lastCustody.payload.facilityId ?? ""),
+      name: String(lastCustody.payload.locationLabel ?? ""),
+      latitude: Number(lastCustody.payload.latitude),
+      longitude: Number(lastCustody.payload.longitude),
+    } : null,
+    currentSimulatedVehiclePoint: route.currentLocation,
+    destination: destination ? { id: destination.id, name: destination.name, latitude: destination.latitude, longitude: destination.longitude } : null,
+    quantityStatus: current.batch.quantityState,
+    handoffStatus: current.batch.handoffState,
+    onwardMovementBlocked: !current.batch.onwardDispatchAllowed || current.batch.handoffState === "needs_review",
+    simulated: true as const,
+    notice: "Simulated vehicle route. Not live GPS.",
+  };
+}
+
 export const appRouter = router({
   system: systemRouter,
   auth: router({
@@ -621,6 +699,34 @@ export const appRouter = router({
         state.batch.networkState = state.network.some(item => item.status === "unavailable") ? "incomplete" : "agreement";
         addActivity(state, node.status === "unavailable" ? "Verifier unavailable" : "Verifier restored", `${node.name} is ${node.status}`, node.status === "unavailable" ? "warning" : "good");
         return snapshot(state);
+      }),
+    route: protectedProcedure.query(({ ctx }) => {
+      requireBatchParticipant(ctx.user, state.batch.id);
+      return routeView(state);
+    }),
+    locationTrace: protectedProcedure.query(({ ctx }) => {
+      requireBatchParticipant(ctx.user, state.batch.id);
+      return locationTraceView(state);
+    }),
+    advanceVehicleCheckpoint: protectedProcedure
+      .input(z.object({ legId: z.string() }).strict())
+      .mutation(({ ctx, input }) => {
+        requireBatchParticipant(ctx.user, state.batch.id);
+        const leg = state.transitLegs.find(item => item.id === input.legId);
+        if (!leg) throw new TRPCError({ code: "NOT_FOUND", message: "Transit leg not found." });
+        if (leg.status === "held" || leg.status === "recalled" || state.batch.handoffState === "needs_review") {
+          throw new TRPCError({ code: "CONFLICT", message: "Onward movement is blocked." });
+        }
+        const routeKey = `${leg.originLocationId}:${leg.destinationLocationId}` as keyof typeof CHECKPOINTS_BY_ROUTE;
+        const sequence = CHECKPOINTS_BY_ROUTE[routeKey] ?? [];
+        const nextIndex = leg.lastCheckpointLocation
+          ? sequence.findIndex(item => item.label === leg.lastCheckpointLocation?.label) + 1
+          : 0;
+        const nextCheckpoint = sequence[nextIndex];
+        if (!nextCheckpoint) throw new TRPCError({ code: "CONFLICT", message: "The predefined checkpoint sequence is finished." });
+        appendTransitCheckpoint(state, leg.id, nextCheckpoint.id);
+        if (nextIndex === sequence.length - 1) leg.status = "arrived";
+        return routeView(state);
       }),
   }),
 });
