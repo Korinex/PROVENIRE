@@ -14,6 +14,9 @@ const MAX_QUANTITY = 1_000_000;
 const ROUTE = ["medsure-labs", "central-pharma", "ramdeobaba-pharmacy"] as const;
 
 type Organization = { id: string; name: string; role: OrgRole; shortRole: string };
+type FacilityLocation = { id: string; name: string; role: OrgRole; latitude: number; longitude: number };
+type Vehicle = { id: string; label: string; carrierName: string; dataSource: string; simulated: true };
+type TransitLeg = { id: string; batchId: string; vehicleId: string; senderId: string; receiverId: string; originLocationId: string; destinationLocationId: string; status: "planned" | "in_transit" | "arrived" | "held" | "recalled"; startedAt: string; lastCheckpointAt: string | null; lastCheckpointLocation: { latitude: number; longitude: number; label: string } | null };
 type Proof = {
   recordHash: string;
   previousHash: string;
@@ -39,6 +42,8 @@ type Dispatch = {
   dispatchedQuantity: number;
   unit: string;
   location: string;
+  originLocationId: string;
+  destinationLocationId: string;
   occurredAt: string;
   status: HandoffState;
   proof: Proof;
@@ -50,6 +55,8 @@ type Receipt = {
   receiverObservedQuantity: number;
   unit: string;
   location: string;
+  locationId: string;
+  locationMismatch: boolean;
   observedAt: string;
   status: HandoffState;
   variance: number;
@@ -69,7 +76,7 @@ type Conflict = {
   status: "open" | "resolved";
   createdAt: string;
 };
-type DemoState = {
+export type DemoState = {
   organizations: Organization[];
   batch: {
     id: string;
@@ -95,10 +102,13 @@ type DemoState = {
     onwardDispatchAllowed: boolean;
     acceptedHandoffs: number;
     activeDispatchId: string | null;
+    locationMismatch: boolean;
   };
+  facilities: FacilityLocation[];
+  vehicles: Vehicle[];
+  transitLegs: TransitLeg[];
   events: Event[];
   dispatches: Dispatch[];
-  transitLegs: { id: string; batchId: string; vehicleId: string; senderId: string; receiverId: string; originLocationId: string; destinationLocationId: string; status: "planned" | "in_transit" | "arrived" | "held" | "recalled"; startedAt: string; lastCheckpointAt: string | null; lastCheckpointLocation: { latitude: number; longitude: number; label: string } | null }[];
   receipts: Receipt[];
   conflicts: Conflict[];
   network: { id: string; name: string; status: "healthy" | "unavailable"; headHash: string; verificationResult: "valid" | "invalid"; eventIds: string[]; divergent: boolean; checkedAt: string }[];
@@ -126,6 +136,17 @@ const organizations: Organization[] = [
   { id: "central-pharma", name: "Central Pharma Distributor", role: "distributor", shortRole: "Distributor" },
   { id: "ramdeobaba-pharmacy", name: "Ramdeobaba Hospital Pharmacy", role: "hospital_pharmacy", shortRole: "Hospital pharmacy" },
 ];
+
+const facilities: FacilityLocation[] = [
+  { id: "medsure-labs", name: "MedSure Labs, Mumbai (simulated)", role: "manufacturer", latitude: 19.0760, longitude: 72.8777 },
+  { id: "central-pharma", name: "Central Pharma Distributor, Delhi (simulated)", role: "distributor", latitude: 28.6139, longitude: 77.2090 },
+  { id: "ramdeobaba-pharmacy", name: "Ramdeobaba Hospital Pharmacy, Nagpur (simulated)", role: "hospital_pharmacy", latitude: 21.1458, longitude: 79.0882 },
+];
+const vehicles: Vehicle[] = [{ id: "PROV-TRUCK-07", label: "PROV-TRUCK-07", carrierName: "Simulated Provenire Transport", dataSource: "Simulated GPS playback", simulated: true }];
+const CHECKPOINTS_BY_ROUTE = {
+  "medsure-labs:central-pharma": [{ id: "mumbai", label: "Mumbai (simulated)", latitude: 19.0760, longitude: 72.8777 }, { id: "surat", label: "Surat (simulated)", latitude: 21.1702, longitude: 72.8311 }, { id: "vadodara", label: "Vadodara (simulated)", latitude: 22.3072, longitude: 73.1812 }, { id: "delhi", label: "Delhi (simulated)", latitude: 28.6139, longitude: 77.2090 }],
+  "central-pharma:ramdeobaba-pharmacy": [{ id: "delhi", label: "Delhi (simulated)", latitude: 28.6139, longitude: 77.2090 }, { id: "bhopal", label: "Bhopal (simulated)", latitude: 23.2599, longitude: 77.4126 }, { id: "nagpur", label: "Nagpur (simulated)", latitude: 21.1458, longitude: 79.0882 }],
+} as const;
 
 function now() {
   return new Date().toISOString();
@@ -185,6 +206,7 @@ const orgKeys = generateOrgKeys(organizations.map(org => org.id));
 function orgName(state: DemoState, id: string | null | undefined) {
   return state.organizations.find(org => org.id === id)?.name ?? "Unknown organization";
 }
+function facilityFor(state: DemoState, id: string) { return state.facilities.find(facility => facility.id === id); }
 
 function proofFor(state: DemoState, body: EventBody): Proof {
   const key = orgKeys.keys[body.actorOrgId];
@@ -249,7 +271,7 @@ function addEvent(
   return event;
 }
 
-function makeInitialState(): DemoState {
+export function makeInitialState(): DemoState {
   const state = {
     organizations: organizations.map(org => ({ ...org })),
     batch: {
@@ -276,10 +298,11 @@ function makeInitialState(): DemoState {
       onwardDispatchAllowed: true,
       acceptedHandoffs: 0,
       activeDispatchId: null,
+      locationMismatch: false,
     },
+    facilities: facilities.map(facility => ({ ...facility })), vehicles: vehicles.map(vehicle => ({ ...vehicle })), transitLegs: [] as TransitLeg[],
     events: [] as Event[],
     dispatches: [] as Dispatch[],
-    transitLegs: [] as DemoState["transitLegs"],
     receipts: [] as Receipt[],
     conflicts: [] as Conflict[],
     network: ["Verifier North", "Verifier Central", "Verifier South"].map((name, index) => ({
@@ -305,6 +328,8 @@ function makeInitialState(): DemoState {
     manufactureDate: state.batch.manufactureDate,
     expiryDate: state.batch.expiryDate,
   });
+  const originFacility = facilityFor(state, "medsure-labs")!;
+  addEvent(state, "custody_location", "Origin custody location signed", "medsure-labs", { batchId: state.batch.id, facilityId: originFacility.id, organizationId: "medsure-labs", latitude: originFacility.latitude, longitude: originFacility.longitude, locationLabel: originFacility.name, reason: "origin_at_facility" });
   refreshNodeHeads(state);
   addActivity(state, "Origin verified", "MedSure Labs signed the batch origin record", "good");
   return state;
@@ -360,6 +385,9 @@ function createDispatch(current: DemoState, receiverId: string, quantityOverride
   validateQuantity(quantity, "dispatch quantity");
   const id = `dispatch-${current.dispatches.length + 1}`;
   const timestamp = now();
+  const originLocation = facilityFor(current, current.batch.currentHolderId);
+  const destinationLocation = facilityFor(current, receiverId);
+  if (!originLocation || !destinationLocation) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Route facility is not configured." });
   const payload = {
     type: "dispatch",
     batchId: current.batch.batchNumber,
@@ -368,6 +396,8 @@ function createDispatch(current: DemoState, receiverId: string, quantityOverride
     quantityDispatched: quantity,
     unit: current.batch.unit,
     location: orgName(current, current.batch.currentHolderId),
+    originLocationId: originLocation.id,
+    destinationLocationId: destinationLocation.id,
     occurredAt: timestamp,
   };
   const event = addEvent(current, "dispatch", "Sender dispatch signed", current.batch.currentHolderId, payload, timestamp);
@@ -379,18 +409,21 @@ function createDispatch(current: DemoState, receiverId: string, quantityOverride
     dispatchedQuantity: quantity,
     unit: current.batch.unit,
     location: orgName(current, current.batch.currentHolderId),
+    originLocationId: originLocation.id,
+    destinationLocationId: destinationLocation.id,
     occurredAt: event.occurredAt,
     status: "receiver_pending",
     proof: event.proof,
   };
   current.dispatches.push(dispatch);
-  current.transitLegs.push({ id: `leg-${id}`, batchId: dispatch.batchId, vehicleId: "PROV-TRUCK-07", senderId: dispatch.senderId, receiverId: dispatch.receiverId, originLocationId: dispatch.senderId, destinationLocationId: dispatch.receiverId, status: "in_transit", startedAt: dispatch.occurredAt, lastCheckpointAt: null, lastCheckpointLocation: null });
+  current.transitLegs.push({ id: `leg-${id}`, batchId: dispatch.batchId, vehicleId: "PROV-TRUCK-07", senderId: dispatch.senderId, receiverId: dispatch.receiverId, originLocationId: dispatch.originLocationId, destinationLocationId: dispatch.destinationLocationId, status: "in_transit", startedAt: dispatch.occurredAt, lastCheckpointAt: null, lastCheckpointLocation: null });
   current.batch.handoffState = "receiver_pending";
   current.batch.activeDispatchId = id;
   current.batch.observedReceiverId = null;
   current.batch.receiverObservedQuantity = null;
   current.batch.quantityVariance = 0;
   current.batch.quantityState = "consistent";
+  current.batch.locationMismatch = false;
   addActivity(current, "Receiver pending", `${orgName(current, current.batch.currentHolderId)} dispatched ${quantity} units to ${receiver.name}`, "warning");
   refreshNodeHeads(current);
   return dispatch;
@@ -409,8 +442,10 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
   if (!receiver) throw new TRPCError({ code: "NOT_FOUND", message: "Receiver organization not found." });
   const facility = FACILITIES.find(item => item.id === facilityId);
   if (!facility) throw new TRPCError({ code: "BAD_REQUEST", message: "Receipt facility is not an allowed demo facility." });
-  const locationMismatch = facility.id !== receiverId;
   validateQuantity(observedQuantity, "receiverObservedQuantity");
+  const receiptLocation = facilityFor(current, facilityId);
+  if (!receiptLocation) throw new TRPCError({ code: "BAD_REQUEST", message: "Receipt facility is not configured." });
+  const locationMismatch = dispatch.destinationLocationId !== receiptLocation.id || receiverId !== dispatch.receiverId || receiptLocation.id !== receiverId;
   const variance = Math.abs(dispatch.dispatchedQuantity - observedQuantity);
   const status: HandoffState = variance === 0 && !locationMismatch ? "accepted" : "needs_review";
   const id = `receipt-${current.receipts.length + 1}`;
@@ -422,7 +457,8 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
     receiverId,
     receiverObservedQuantity: observedQuantity,
     unit: current.batch.unit,
-    location: facility.name,
+    location: receiptLocation.name,
+    locationId: receiptLocation.id,
     observedAt: timestamp,
   };
   const event = addEvent(current, "receipt", "Receiver receipt signed", receiverId, payload, timestamp);
@@ -439,7 +475,9 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
     receiverId,
     receiverObservedQuantity: observedQuantity,
     unit: current.batch.unit,
-    location: facility.name,
+    location: receiptLocation.name,
+    locationId: receiptLocation.id,
+    locationMismatch,
     observedAt: event.occurredAt,
     status,
     variance,
@@ -456,6 +494,9 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
   current.batch.quantityVariance = variance;
   current.batch.varianceDirection = receipt.varianceDirection;
   current.batch.handoffState = status;
+  current.batch.locationMismatch = locationMismatch;
+  const leg = current.transitLegs.find(item => item.senderId === dispatch.senderId && item.receiverId === dispatch.receiverId && item.status === "in_transit");
+  if (leg) leg.status = locationMismatch ? "held" : "arrived";
 
   if (status === "accepted") {
     current.batch.currentHolderId = receiverId;
@@ -466,6 +507,7 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
     current.batch.acceptedHandoffs += 1;
     current.batch.routeCoverageState = current.batch.acceptedHandoffs >= ROUTE.length - 1 ? "complete" : "incomplete";
     current.batch.onwardDispatchAllowed = current.batch.acceptedHandoffs < ROUTE.length - 1;
+    addEvent(current, "custody_location", "Facility arrival signed", receiverId, { batchId: current.batch.id, facilityId: receiptLocation.id, organizationId: receiverId, latitude: receiptLocation.latitude, longitude: receiptLocation.longitude, locationLabel: receiptLocation.name, reason: "arrived_at_facility" });
     addActivity(current, "Handoff accepted", `${receiver.name} confirmed ${observedQuantity} units`, "good");
   } else {
     if (variance > 0) {
@@ -475,6 +517,11 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
     current.batch.acceptedForOnwardCustody = 0;
     current.batch.onwardDispatchAllowed = false;
     current.batch.routeCoverageState = "incomplete";
+    if (locationMismatch && variance === 0) {
+      current.batch.quantityState = "consistent";
+      current.batch.conflictState = "open";
+      addActivity(current, "Location mismatch", `${receiver.name} reported a different simulated receiving facility`, "danger");
+    }
     const conflict: Conflict = {
       id: `conflict-${current.conflicts.length + 1}`,
       dispatchId,
@@ -491,13 +538,29 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
     if (variance > 0) {
       current.conflicts.push(conflict);
       addActivity(current, "Quantity discrepancy", `${receiver.name} observed ${observedQuantity}; variance ${variance}`, "danger");
-    } else addActivity(current, "Location mismatch", `${receiver.name} submitted a receipt at ${facility.name}`, "danger");
+    }
     appendIncidentTimeline(current, { type: "conflict_opened", timestamp: event.occurredAt, actorOrganization: receiverId, relatedEventIds: [event.id], label: locationMismatch ? "Location conflict opened" : "Quantity conflict opened", simulated: true });
     appendIncidentTimeline(current, { type: "onward_movement_blocked", timestamp: event.occurredAt, actorOrganization: receiverId, relatedEventIds: [event.id], label: "Onward movement blocked", simulated: true });
   }
 
   refreshNodeHeads(current);
   return receipt;
+}
+
+/** @internal Appends a checkpoint from the predefined simulated route. */
+export function appendTransitCheckpoint(current: DemoState, legId: string, checkpointId: string) {
+  const leg = current.transitLegs.find(item => item.id === legId);
+  if (!leg) throw new TRPCError({ code: "NOT_FOUND", message: "Transit leg not found." });
+  if (leg.status !== "in_transit") throw new TRPCError({ code: "CONFLICT", message: "Transit leg is not in transit." });
+  const routeKey = `${leg.originLocationId}:${leg.destinationLocationId}` as keyof typeof CHECKPOINTS_BY_ROUTE;
+  const checkpoint = CHECKPOINTS_BY_ROUTE[routeKey]?.find(item => item.id === checkpointId);
+  if (!checkpoint) throw new TRPCError({ code: "BAD_REQUEST", message: "Checkpoint is not in the predefined simulated route." });
+  const timestamp = now();
+  addEvent(current, "transit_checkpoint", "Simulated transit checkpoint signed", leg.senderId, { vehicleId: leg.vehicleId, batchId: current.batch.id, latitude: checkpoint.latitude, longitude: checkpoint.longitude, checkpointLabel: checkpoint.label, source: "simulated_gps" }, timestamp);
+  leg.lastCheckpointAt = timestamp;
+  leg.lastCheckpointLocation = { latitude: checkpoint.latitude, longitude: checkpoint.longitude, label: checkpoint.label };
+  refreshNodeHeads(current);
+  return leg;
 }
 
 function publicVerifier(current: DemoState) {
@@ -623,6 +686,8 @@ function snapshot(current: DemoState) {
     })),
     events: current.events.map(event => ({ ...event, actorName: orgName(current, event.actorId) })),
     conflicts: current.conflicts,
+    facilities: current.facilities,
+    vehicles: current.vehicles,
     network: current.network,
     activity: current.activity.slice(0, 12),
     location: current.location,
@@ -752,11 +817,17 @@ export const appRouter = router({
         return snapshot(state);
       }),
     receipt: protectedProcedure
-      .input(z.object({ dispatchId: z.string(), receiverId: z.string(), receiverObservedQuantity: z.number().int().positive().max(MAX_QUANTITY), facilityId: z.enum(["medsure-labs", "central-pharma", "ramdeobaba-pharmacy"]).optional() }))
+      .input(z.object({
+        dispatchId: z.string(),
+        receiverId: z.string(),
+        receiverObservedQuantity: z.number().int().positive().max(MAX_QUANTITY),
+        facilityId: z.enum(["medsure-labs", "central-pharma", "ramdeobaba-pharmacy"]).optional(),
+        locationId: z.enum(["medsure-labs", "central-pharma", "ramdeobaba-pharmacy"]).optional(),
+      }))
       .mutation(({ ctx, input }) => {
         const membership = requireBatchParticipant(ctx.user, "receipt");
         if (ctx.user.role !== "admin" && membership.organizationId !== input.receiverId) throw new TRPCError({ code: "FORBIDDEN", message: "Receipt actor must match the authenticated organization." });
-        createReceipt(state, input.dispatchId, input.receiverId, input.receiverObservedQuantity, input.facilityId);
+        createReceipt(state, input.dispatchId, input.receiverId, input.receiverObservedQuantity, input.facilityId ?? input.locationId);
         return snapshot(state);
       }),
     tamper: protectedProcedure.mutation(({ ctx }) => {

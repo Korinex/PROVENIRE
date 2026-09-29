@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { appRouter, isLocationStale, isOnPredefinedRoute } from "./routers";
+import { createHash } from "node:crypto";
+import { appendTransitCheckpoint, appRouter, isLocationStale, isOnPredefinedRoute, makeInitialState } from "./routers";
 import type { TrpcContext } from "./_core/context";
+import { getLocationFreshness, STALE_LOCATION_THRESHOLD_MS } from "./location";
+import { canonicalize } from "./proof";
 
 function caller() {
   const ctx: TrpcContext = {
@@ -398,5 +401,86 @@ describe("Provenire custody protocol", () => {
     const state = await api.provenire.state();
     expect(state.activity.length).toBeLessThanOrEqual(12);
     expect(state.activity[0]).toMatchObject({ id: expect.any(String), label: expect.any(String), occurredAt: expect.any(String) });
+  });
+
+  it("appends a signed custody location event linked to the prior record", async () => {
+    const state = await caller().provenire.reset();
+    const event = state.events.find(item => item.type === "custody_location")!;
+    const prior = state.events[state.events.indexOf(event) - 1]!;
+    expect(event.payload).toMatchObject({ facilityId: "medsure-labs", organizationId: "medsure-labs", latitude: 19.076, longitude: 72.8777 });
+    expect(event.proof.previousHash).toBe(prior.proof.recordHash);
+    expect(event.proof.recordHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(state.publicVerifier.signatureValid).toBe(true);
+  });
+
+  it("restricts simulated checkpoints to the predefined route through the internal helper", () => {
+    const state = makeInitialState();
+    state.transitLegs.push({ id: "leg-test-1", batchId: state.batch.id, vehicleId: "PROV-TRUCK-07", senderId: "medsure-labs", receiverId: "central-pharma", originLocationId: "medsure-labs", destinationLocationId: "central-pharma", status: "in_transit", startedAt: state.events.at(-1)!.occurredAt, lastCheckpointAt: null, lastCheckpointLocation: null });
+    expect(() => appendTransitCheckpoint(state, "leg-test-1", "not-a-route-stop")).toThrow("predefined simulated route");
+    appendTransitCheckpoint(state, "leg-test-1", "surat");
+    const event = state.events.at(-1)!;
+    expect(event.payload).toMatchObject({ vehicleId: "PROV-TRUCK-07", checkpointLabel: "Surat (simulated)", source: "simulated_gps" });
+    expect(state.transitLegs[0]?.lastCheckpointAt).toBe(event.occurredAt);
+    expect(state.transitLegs[0]?.lastCheckpointLocation?.label).toBe("Surat (simulated)");
+  });
+
+  it("detects tampered location and checkpoint payload hashes", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    expect((await api.provenire.tamper()).publicVerifier.hashValid).toBe(false);
+    const state = makeInitialState();
+    state.transitLegs.push({ id: "leg-test-2", batchId: state.batch.id, vehicleId: "PROV-TRUCK-07", senderId: "medsure-labs", receiverId: "central-pharma", originLocationId: "medsure-labs", destinationLocationId: "central-pharma", status: "in_transit", startedAt: state.events.at(-1)!.occurredAt, lastCheckpointAt: null, lastCheckpointLocation: null });
+    appendTransitCheckpoint(state, "leg-test-2", "surat");
+    const event = state.events.at(-1)!;
+    event.payload.latitude = 0;
+    const hash = createHash("sha256").update(canonicalize({ eventId: event.id, batchId: state.batch.id, seq: state.events.length - 1, type: event.type, actorOrgId: event.actorId, occurredAt: event.occurredAt, previousHash: event.proof.previousHash, payload: event.payload }), "utf8").digest("hex");
+    expect(hash).not.toBe(event.proof.recordHash);
+  });
+
+  it("holds a matching-quantity receipt at the wrong simulated facility", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    const state = await api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000, locationId: "ramdeobaba-pharmacy" });
+    expect(state.receipts[0]).toMatchObject({ locationMismatch: true, status: "needs_review", variance: 0 });
+    expect(state.batch).toMatchObject({ locationMismatch: true, quantityState: "consistent", onwardDispatchAllowed: false });
+    expect(state.conflicts).toHaveLength(0);
+  });
+
+  it("classifies simulated checkpoint freshness with an injected clock", () => {
+    const clock = () => Date.parse("2026-09-29T12:00:00.000Z");
+    expect(getLocationFreshness(null, clock)).toBe("unknown");
+    expect(getLocationFreshness("2026-09-29T11:45:00.000Z", clock)).toBe("fresh");
+    expect(getLocationFreshness(new Date(clock() - STALE_LOCATION_THRESHOLD_MS - 1).toISOString(), clock)).toBe("stale");
+  });
+
+  it("seeds simulated facility and vehicle data", () => {
+    const state = makeInitialState();
+    expect(state.facilities).toHaveLength(3);
+    expect(state.vehicles[0]).toMatchObject({ id: "PROV-TRUCK-07", carrierName: "Simulated Provenire Transport", dataSource: "Simulated GPS playback", simulated: true });
+  });
+
+  it("signs a custody arrival after an accepted receipt", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    const state = await api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 });
+    expect(state.events.at(-1)).toMatchObject({ type: "custody_location", actorId: "central-pharma", payload: expect.objectContaining({ facilityId: "central-pharma", reason: "arrived_at_facility" }) });
+  });
+
+  it("marks a completed simulated transit leg as arrived", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    const state = await api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 });
+    expect(state.transitLegs[0]?.status).toBe("arrived");
+  });
+
+  it("treats an invalid simulated report time as unknown", () => {
+    expect(getLocationFreshness("not-a-time", () => 0)).toBe("unknown");
+  });
+
+  it("does not expose a checkpoint mutation on the Provenire router", () => {
+    expect(Object.keys(appRouter._def.procedures)).not.toContain("provenire.appendTransitCheckpoint");
   });
 });
