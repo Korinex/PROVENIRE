@@ -8,6 +8,7 @@ import { generateOrgKeys, sealEvent, verifyChain, chainIsValid } from "./proof/i
 import type { EventBody as ProofEventBody, SealedEvent } from "./proof/seal";
 import { requireBatchParticipant } from "./access";
 import { getLocationFreshness, getLocationStatus, getRouteStatus, getVehicleStatus } from "./location";
+import { deriveIncident } from "./incident";
 
 type OrgRole = "manufacturer" | "distributor" | "hospital_pharmacy";
 type HandoffState = "receiver_pending" | "accepted" | "needs_review";
@@ -707,6 +708,10 @@ export const appRouter = router({
     locationTrace: protectedProcedure.query(({ ctx }) => {
       requireBatchParticipant(ctx.user, state.batch.id);
       return locationTraceView(state);
+    }),
+    incident: protectedProcedure.query(({ ctx }) => {
+      requireBatchParticipant(ctx.user, state.batch.id);
+      return { ...deriveIncident(state), simulated: true as const };
     }),
     advanceVehicleCheckpoint: protectedProcedure
       .input(z.object({ legId: z.string() }).strict())
