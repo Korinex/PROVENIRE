@@ -38,6 +38,7 @@ describe("separate status model", () => {
     await expect(caller(false).provenire.statuses()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
     const result = await caller().provenire.statuses();
     expect(result).toEqual({
+      simulated: true,
       recordIntegrity: "valid",
       quantityAgreement: "unknown",
       historyCoverage: "incomplete",
@@ -54,6 +55,7 @@ describe("separate status model", () => {
     const api = caller();
     await api.provenire.runHappyPath();
     expect(await api.provenire.statuses()).toEqual({
+      simulated: true,
       recordIntegrity: "valid",
       quantityAgreement: "consistent",
       historyCoverage: "complete",
