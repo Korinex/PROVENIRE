@@ -9,6 +9,7 @@ import type { EventBody as ProofEventBody, SealedEvent } from "./proof/seal";
 import { getActorOrganizationId, requireBatchParticipant } from "./access";
 import { getLocationFreshness, getLocationStatus, getRouteStatus, getVehicleStatus } from "./location";
 import { deriveIncident } from "./incident";
+import { deriveStatuses } from "./status";
 
 type OrgRole = "manufacturer" | "distributor" | "hospital_pharmacy";
 type HandoffState = "receiver_pending" | "accepted" | "needs_review";
@@ -130,7 +131,7 @@ export type DemoState = {
     routeCoverageState: "complete" | "incomplete";
     quantityState: "consistent" | "discrepant";
     conflictState: "none" | "open" | "resolved";
-    networkState: "agreement" | "incomplete";
+    networkState: "agreement" | "incomplete" | "disagreement";
     onwardDispatchAllowed: boolean;
     acceptedHandoffs: number;
     activeDispatchId: string | null;
@@ -144,7 +145,7 @@ export type DemoState = {
   receipts: Receipt[];
   conflicts: Conflict[];
   incident: IncidentState;
-  network: { id: string; name: string; status: "healthy" | "unavailable"; headHash: string; checkedAt: string }[];
+  network: { id: string; name: string; status: "healthy" | "unavailable"; headHash: string; divergent: boolean; verificationResult: "valid" | "invalid"; checkedAt: string }[];
   activity: { id: string; label: string; detail: string; tone: "neutral" | "good" | "warning" | "danger"; occurredAt: string }[];
 };
 
@@ -286,6 +287,8 @@ export function makeInitialState(): DemoState {
       name,
       status: "healthy" as const,
       headHash: "GENESIS",
+      divergent: false,
+      verificationResult: "valid" as const,
       checkedAt: now(),
     })),
     activity: [] as DemoState["activity"],
@@ -311,7 +314,18 @@ let tamperedEvents: Event[] | null = null;
 
 function refreshNodeHeads(current: DemoState) {
   const headHash = current.events.at(-1)?.proof.recordHash ?? "GENESIS";
-  current.network = current.network.map(node => ({ ...node, headHash, checkedAt: now() }));
+  const events = current.events.map((event, index) => ({ eventId: event.id, batchId: current.batch.id, seq: index, type: event.type, actorOrgId: event.actorId, occurredAt: event.occurredAt, previousHash: event.proof.previousHash, payload: event.payload, recordHash: event.proof.recordHash, signature: event.proof.signature })) satisfies SealedEvent[];
+  current.network = current.network.map(node => {
+    if (node.status === "unavailable") return node;
+    const valid = chainIsValid(verifyChain(events, orgKeys.getPublicKeyMap()));
+    return { ...node, headHash: node.divergent ? "DIVERGENT-HEAD" : headHash, verificationResult: valid ? "valid" : "invalid", checkedAt: now() };
+  });
+  const peers = current.network.filter(node => node.status === "healthy");
+  current.batch.networkState = current.network.some(node => node.status === "unavailable")
+    ? "incomplete"
+    : new Set(peers.map(node => node.headHash)).size > 1 || new Set(peers.map(node => node.verificationResult)).size > 1
+      ? "disagreement"
+      : "agreement";
 }
 
 function getExpectedReceiverId(current: DemoState): string | undefined {
@@ -530,11 +544,10 @@ function publicVerifier(current: DemoState) {
   const verification = verifyChain(proofEvents, orgKeys.getPublicKeyMap());
   const tampered = !chainIsValid(verification);
   const conflictOpen = current.batch.conflictState === "open";
-  const networkIncomplete = current.batch.networkState === "incomplete";
   let verificationStatus = "verified_history";
   if (tampered) verificationStatus = "tampered";
   else if (conflictOpen) verificationStatus = "needs_review";
-  else if (networkIncomplete) verificationStatus = "network_disagreement";
+  else if (current.batch.networkState !== "agreement") verificationStatus = "network_disagreement";
   else if (current.batch.handoffState === "receiver_pending") verificationStatus = "receiver_pending";
   else if (current.batch.routeCoverageState === "incomplete") verificationStatus = "coverage_incomplete";
 
@@ -557,7 +570,7 @@ function publicVerifier(current: DemoState) {
     recallClear: true,
     expiryClear: true,
     conflictOpen,
-    networkAgreement: !networkIncomplete,
+    networkAgreement: current.batch.networkState === "agreement",
     physicalAuthenticityProven: false,
     notice: "Provenire verifies submitted record integrity and authorship. It does not verify the medicine's physical contents.",
   };
@@ -589,6 +602,7 @@ function snapshot(current: DemoState) {
     network: current.network,
     activity: current.activity.slice(0, 12),
     publicVerifier: publicVerifier(current),
+    statuses: deriveStatuses(current),
   };
 }
 
@@ -751,6 +765,7 @@ export const appRouter = router({
       const quantity = event.payload.quantity;
       event.payload = { ...event.payload, ...(typeof quantity === "number" ? { quantity: quantity + 1 } : { tampered: true }) };
       state.batch.recordIntegrityState = "tampered";
+      refreshNodeHeads(state);
       addActivity(state, "Tamper detected", "A signed field no longer matches its stored proof", "danger");
       return snapshot(state);
     }),
@@ -760,17 +775,19 @@ export const appRouter = router({
         tamperedEvents = null;
       }
       state.batch.recordIntegrityState = "valid";
+      refreshNodeHeads(state);
       addActivity(state, "Proof restored", "Reset or restoration returned the record to a valid state", "good");
       return snapshot(state);
     }),
     togglePeer: publicProcedure
-      .input(z.object({ nodeId: z.string() }))
+      .input(z.object({ nodeId: z.string(), diverge: z.boolean().optional() }).strict())
       .mutation(({ input }) => {
         const node = state.network.find(item => item.id === input.nodeId);
         if (!node) throw new TRPCError({ code: "NOT_FOUND", message: "Verifier node not found." });
-        node.status = node.status === "healthy" ? "unavailable" : "healthy";
-        state.batch.networkState = state.network.some(item => item.status === "unavailable") ? "incomplete" : "agreement";
-        addActivity(state, node.status === "unavailable" ? "Verifier unavailable" : "Verifier restored", `${node.name} is ${node.status}`, node.status === "unavailable" ? "warning" : "good");
+        if (input.diverge) node.divergent = !node.divergent;
+        else node.status = node.status === "healthy" ? "unavailable" : "healthy";
+        refreshNodeHeads(state);
+        addActivity(state, input.diverge ? node.divergent ? "Verifier history disagreement" : "Verifier history restored" : node.status === "unavailable" ? "Verifier unavailable" : "Verifier restored", `${node.name} is ${input.diverge ? node.headHash : node.status}`, node.divergent || node.status === "unavailable" ? "warning" : "good");
         return snapshot(state);
       }),
     route: protectedProcedure.query(({ ctx }) => {
@@ -784,6 +801,10 @@ export const appRouter = router({
     incident: protectedProcedure.query(({ ctx }) => {
       requireBatchParticipant(ctx.user, state.batch.id);
       return { ...deriveIncident(state), simulated: true as const };
+    }),
+    statuses: protectedProcedure.query(({ ctx }) => {
+      requireBatchParticipant(ctx.user, state.batch.id);
+      return deriveStatuses(state);
     }),
     activateSimulatedHold: protectedProcedure
       .input(z.object({ reason: z.string().trim().min(5).max(280), type: z.enum(["simulated_hold", "simulated_recall"]).default("simulated_hold") }).strict())
