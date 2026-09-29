@@ -10,11 +10,14 @@ export { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 // `state` it sends. Do NOT call it during render (no `href={startLogin()}` /
 // `loginUrl={...}`): each call overwrites the cookie, so a stray render-phase
 // call would desync it from an in-flight login and the callback would reject it
-// with "invalid oauth state". It returns void by design, so there is no URL to
-// stash across renders.
-export const startLogin = () => {
+// with "invalid oauth state". It returns whether the OAuth configuration is
+// available; no URL is stashed across renders.
+export const isOAuthConfigured = () => Boolean(import.meta.env.VITE_OAUTH_PORTAL_URL && import.meta.env.VITE_APP_ID);
+
+export const startLogin = (type: "signIn" | "signUp" = "signIn") => {
   const oauthPortalUrl = import.meta.env.VITE_OAUTH_PORTAL_URL;
   const appId = import.meta.env.VITE_APP_ID;
+  if (!oauthPortalUrl || !appId) return false;
   const redirectUri = `${window.location.origin}/api/oauth/callback`;
 
   const nonce = crypto.randomUUID();
@@ -25,7 +28,8 @@ export const startLogin = () => {
   url.searchParams.set("appId", appId);
   url.searchParams.set("redirectUri", redirectUri);
   url.searchParams.set("state", state);
-  url.searchParams.set("type", "signIn");
+  url.searchParams.set("type", type);
 
   window.location.href = url.toString();
+  return true;
 };

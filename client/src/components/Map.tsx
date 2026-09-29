@@ -93,18 +93,28 @@ const FORGE_BASE_URL =
 const MAPS_PROXY_URL = `${FORGE_BASE_URL}/v1/maps/proxy`;
 
 function loadMapScript() {
-  return new Promise(resolve => {
+  if (!API_KEY) return Promise.reject(new Error("Google Maps API key is not configured."));
+  if (window.google?.maps?.Map) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
     const script = document.createElement("script");
     script.src = `${MAPS_PROXY_URL}/maps/api/js?key=${API_KEY}&v=weekly&libraries=marker,places,geocoding,geometry`;
     script.async = true;
     script.crossOrigin = "anonymous";
     script.onload = () => {
-      resolve(null);
+      if (!window.google?.maps?.Map) {
+        reject(new Error("Google Maps loaded without its map library."));
+        return;
+      }
+      resolve();
       script.remove(); // Clean up immediately
     };
     script.onerror = () => {
-      console.error("Failed to load Google Maps script");
+      script.remove();
+      reject(new Error("Failed to load Google Maps script."));
     };
+    window.setTimeout(() => {
+      if (!window.google?.maps?.Map) reject(new Error("Google Maps timed out while loading."));
+    }, 15_000);
     document.head.appendChild(script);
   });
 }
@@ -114,6 +124,7 @@ interface MapViewProps {
   initialCenter?: google.maps.LatLngLiteral;
   initialZoom?: number;
   onMapReady?: (map: google.maps.Map) => void;
+  onMapError?: (error: Error) => void;
 }
 
 export function MapView({
@@ -121,6 +132,7 @@ export function MapView({
   initialCenter = { lat: 37.7749, lng: -122.4194 },
   initialZoom = 12,
   onMapReady,
+  onMapError,
 }: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<google.maps.Map | null>(null);
@@ -146,8 +158,11 @@ export function MapView({
   });
 
   useEffect(() => {
-    init();
-  }, [init]);
+    void init().catch(error => {
+      console.error("Google Maps initialization failed", error);
+      onMapError?.(error instanceof Error ? error : new Error("Google Maps initialization failed."));
+    });
+  }, [init, onMapError]);
 
   return (
     <div ref={mapContainer} className={cn("w-full h-[500px]", className)} />

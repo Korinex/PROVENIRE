@@ -5,10 +5,16 @@ import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
+import AuthPage from "./pages/AuthPage";
+
+function LoginPage() { return <AuthPage mode="login" />; }
+function RegisterPage() { return <AuthPage mode="register" />; }
 
 function Router() {
   return <Switch>
     <Route path="/" component={Home} />
+    <Route path="/login" component={LoginPage} />
+    <Route path="/register" component={RegisterPage} />
     <Route path="/verify/:token" component={Home} />
     <Route path="/404" component={NotFound} />
     <Route component={NotFound} />

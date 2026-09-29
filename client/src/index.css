@@ -231,7 +231,11 @@ body { font-size:14px; line-height:1.5; font-weight:400; }
 .qr-placeholder { display:grid; min-height:92px; min-width:92px; place-items:center; flex:0 0 auto; border-radius:8px; background:var(--sand); padding:8px; }
 .qr-placeholder svg { display:block; max-width:100%; height:auto; }
 .route-map-card { overflow:hidden; }
-.route-map { min-height:360px; height:360px !important; }
+.route-map { position:relative; min-height:360px; height:360px !important; }
+.route-map-google { position:absolute !important; inset:0; min-height:100%; height:100% !important; }
+.route-map-fallback { display:flex; width:100%; height:100%; min-height:360px; flex-direction:column; overflow:hidden; background:#eef3f7; }
+.route-map-fallback-label { flex:0 0 auto; border-bottom:1px solid #d5dee8; padding:10px 14px; color:#52627e; font-size:11px; font-weight:600; }
+.route-map-fallback svg { display:block; width:100%; height:100%; min-height:320px; }
 .route-map-legend { display:flex; flex-wrap:wrap; gap:14px; border-top:1px solid var(--line); padding:12px 16px; color:#64758a; font-size:11px; }
 .route-map-legend span { display:inline-flex; align-items:center; gap:6px; }
 .legend-dot { display:inline-block; width:8px; height:8px; border-radius:999px; }
@@ -245,7 +249,17 @@ body { font-size:14px; line-height:1.5; font-weight:400; }
 .public-verification-page .public-card { background:#fff; }
 .public-verification-page .public-card-top h2 { color:#172b42; font-size:23px; font-weight:600; }
 .public-verification-page .public-card-top p { margin:6px 0 12px; color:#64758a; }
-@media(max-width:640px) { .route-map,.route-map-card .route-map { min-height:300px; height:300px !important; } }
+.auth-page { display:grid; min-height:100vh; place-items:center; background:radial-gradient(ellipse at top,#183448,#0b1220 65%); padding:24px; }
+.auth-card { width:min(100%,440px); border:1px solid rgba(148,163,184,.25); border-radius:18px; background:#111b29; padding:32px; color:#e2e8f0; box-shadow:0 24px 80px rgba(0,0,0,.28); }
+.auth-card h1 { margin:22px 0 8px; color:#fff; font-size:30px; font-weight:600; }
+.auth-card p { color:#9aabbd; font-size:14px; line-height:1.65; }
+.auth-brand { color:#67d6f6; font-size:12px; font-weight:700; letter-spacing:.2em; text-decoration:none; }
+.auth-provider-button { width:100%; margin-top:20px; border:0; border-radius:9px; background:#38bdf8; padding:12px 16px; color:#082235; font-weight:700; cursor:pointer; }
+.auth-provider-button:disabled { cursor:not-allowed; opacity:.5; }
+.auth-config-message { margin-top:16px; border:1px solid rgba(251,191,36,.35); border-radius:9px; background:rgba(251,191,36,.08); padding:12px; color:#fde68a; font-size:12px; line-height:1.55; }
+.auth-switch { margin-top:20px; text-align:center; font-size:13px; }
+.auth-switch a { color:#67d6f6; text-decoration:underline; }
+@media(max-width:640px) { .route-map,.route-map-card .route-map { min-height:300px; height:300px !important; } .route-map-fallback { min-height:300px; } .route-map-fallback svg { min-height:260px; } }
 @media(max-width:480px) { .public-qr-actions { display:grid; grid-template-columns:1fr; } .public-qr-actions .ghost-button { width:100%; } }
 .data-cell strong,.fact-card strong { margin-top:6px; color:#14224a; font-size:15px; line-height:1.35; font-weight:600; }
 .proof-badge { color:#126a5a; }
