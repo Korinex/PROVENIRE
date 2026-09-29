@@ -9,6 +9,7 @@ import type { EventBody as ProofEventBody, SealedEvent } from "./proof/seal";
 import { getActorOrganizationId, requireBatchParticipant } from "./access";
 import { getLocationFreshness, getLocationStatus, getRouteStatus, getVehicleStatus } from "./location";
 import { deriveIncident } from "./incident";
+import { deriveStatuses } from "./status";
 
 type OrgRole = "manufacturer" | "distributor" | "hospital_pharmacy";
 type HandoffState = "receiver_pending" | "accepted" | "needs_review";
@@ -514,7 +515,7 @@ export function appendTransitCheckpoint(current: DemoState, legId: string, check
   return leg;
 }
 
-function publicVerifier(current: DemoState) {
+function recordVerification(current: DemoState) {
   const proofEvents = current.events.map(event => ({
     eventId: event.id,
     batchId: current.batch.id,
@@ -527,8 +528,16 @@ function publicVerifier(current: DemoState) {
     recordHash: event.proof.recordHash,
     signature: event.proof.signature,
   })) satisfies SealedEvent[];
-  const verification = verifyChain(proofEvents, orgKeys.getPublicKeyMap());
-  const tampered = !chainIsValid(verification);
+  return verifyChain(proofEvents, orgKeys.getPublicKeyMap());
+}
+
+export function isRecordChainValid(current: DemoState) {
+  return chainIsValid(recordVerification(current));
+}
+
+function publicVerifier(current: DemoState) {
+  const verification = recordVerification(current);
+  const tampered = !isRecordChainValid(current);
   const conflictOpen = current.batch.conflictState === "open";
   const networkIncomplete = current.batch.networkState === "incomplete";
   let verificationStatus = "verified_history";
@@ -867,6 +876,10 @@ export const appRouter = router({
     hold: protectedProcedure.query(({ ctx }) => {
       requireBatchParticipant(ctx.user, state.batch.id);
       return holdView(state);
+    }),
+    statuses: protectedProcedure.query(({ ctx }) => {
+      requireBatchParticipant(ctx.user, state.batch.id);
+      return { ...deriveStatuses(state, Date.now()), simulated: true as const };
     }),
     advanceVehicleCheckpoint: protectedProcedure
       .input(z.object({ legId: z.string() }).strict())
