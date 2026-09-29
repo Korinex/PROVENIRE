@@ -730,6 +730,31 @@ export const appRouter = router({
   provenire: router({
     state: publicProcedure.query(() => snapshot(state)),
     publicVerify: publicProcedure.query(() => publicVerifier(state)),
+    verifyBatch: publicProcedure
+      .input(z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) }).strict())
+      .query(({ input }) => {
+        if (input.token !== state.batch.batchNumber) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Verification record not found." });
+        }
+        const projection = publicVerifier(state);
+        return {
+          productName: projection.productName,
+          batchNumber: projection.batchNumber,
+          manufacturer: projection.manufacturer,
+          manufactureDate: projection.manufactureDate,
+          expiryDate: projection.expiryDate,
+          verificationStatus: projection.verificationStatus,
+          recordIntegrityState: projection.recordIntegrityState,
+          networkAgreement: projection.networkAgreement,
+          handoffComplete: projection.handoffComplete,
+          coverageComplete: projection.coverageComplete,
+          quantityConsistent: projection.quantityConsistent,
+          conflictOpen: projection.conflictOpen,
+          notice: projection.notice,
+          checkedAt: now(),
+          readOnly: true as const,
+        };
+      }),
     reset: publicProcedure.mutation(() => {
       state = makeInitialState();
       tamperedEvents = null;
