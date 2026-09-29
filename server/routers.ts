@@ -146,7 +146,7 @@ export type DemoState = {
   receipts: Receipt[];
   conflicts: Conflict[];
   incident: IncidentState;
-  network: { id: string; name: string; status: "healthy" | "unavailable"; headHash: string; divergent: boolean; verificationResult: "valid" | "invalid"; checkedAt: string }[];
+  network: { id: string; name: string; status: "healthy" | "unavailable"; headHash: string; eventCount: number; divergent: boolean; verificationResult: "valid" | "invalid"; checkedAt: string }[];
   activity: { id: string; label: string; detail: string; tone: "neutral" | "good" | "warning" | "danger"; occurredAt: string }[];
 };
 
@@ -172,6 +172,8 @@ function now() {
 }
 
 const orgKeys = generateOrgKeys(organizations.map(org => org.id));
+// Each verifier keeps its own event-log replica and verifies that replica locally.
+const verifierLedgers = new Map<string, SealedEvent[]>();
 
 function orgName(state: DemoState, id: string | null | undefined) {
   return state.organizations.find(org => org.id === id)?.name ?? "Unknown organization";
@@ -288,6 +290,7 @@ export function makeInitialState(): DemoState {
       name,
       status: "healthy" as const,
       headHash: "GENESIS",
+      eventCount: 0,
       divergent: false,
       verificationResult: "valid" as const,
       checkedAt: now(),
@@ -314,12 +317,22 @@ let state = makeInitialState();
 let tamperedEvents: Event[] | null = null;
 
 function refreshNodeHeads(current: DemoState) {
-  const headHash = current.events.at(-1)?.proof.recordHash ?? "GENESIS";
   const events = current.events.map((event, index) => ({ eventId: event.id, batchId: current.batch.id, seq: index, type: event.type, actorOrgId: event.actorId, occurredAt: event.occurredAt, previousHash: event.proof.previousHash, payload: event.payload, recordHash: event.proof.recordHash, signature: event.proof.signature })) satisfies SealedEvent[];
   current.network = current.network.map(node => {
     if (node.status === "unavailable") return node;
-    const valid = chainIsValid(verifyChain(events, orgKeys.getPublicKeyMap()));
-    return { ...node, headHash: node.divergent ? "DIVERGENT-HEAD" : headHash, verificationResult: valid ? "valid" : "invalid", checkedAt: now() };
+    // A lagged peer intentionally keeps its previous signed history instead of
+    // pretending to have the central event-log head.
+    const peerEvents = structuredClone(node.divergent ? events.slice(0, -1) : events);
+    verifierLedgers.set(node.id, peerEvents);
+    const localLedger = verifierLedgers.get(node.id) ?? [];
+    const valid = chainIsValid(verifyChain(localLedger, orgKeys.getPublicKeyMap()));
+    return {
+      ...node,
+      headHash: localLedger.at(-1)?.recordHash ?? "GENESIS",
+      eventCount: localLedger.length,
+      verificationResult: valid ? "valid" : "invalid",
+      checkedAt: now(),
+    };
   });
   const peers = current.network.filter(node => node.status === "healthy");
   current.batch.networkState = current.network.some(node => node.status === "unavailable")
