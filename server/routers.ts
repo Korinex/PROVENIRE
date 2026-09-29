@@ -10,6 +10,7 @@ import { getActorOrganizationId, requireBatchParticipant } from "./access";
 import { getLocationFreshness, getLocationStatus, getRouteStatus, getVehicleStatus } from "./location";
 import { deriveIncident } from "./incident";
 import { deriveStatuses } from "./status";
+import { allowVerificationRequest } from "./verificationRateLimit";
 
 type OrgRole = "manufacturer" | "distributor" | "hospital_pharmacy";
 type HandoffState = "receiver_pending" | "accepted" | "needs_review";
@@ -732,7 +733,11 @@ export const appRouter = router({
     publicVerify: publicProcedure.query(() => publicVerifier(state)),
     verifyBatch: publicProcedure
       .input(z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) }).strict())
-      .query(({ input }) => {
+      .query(({ ctx, input }) => {
+        const clientKey = ctx.req.ip || ctx.req.socket?.remoteAddress || "unknown";
+        if (!allowVerificationRequest(clientKey)) {
+          throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Verification rate limit exceeded. Try again shortly." });
+        }
         if (input.token !== state.batch.batchNumber) {
           throw new TRPCError({ code: "NOT_FOUND", message: "Verification record not found." });
         }
