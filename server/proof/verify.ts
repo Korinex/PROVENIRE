@@ -42,5 +42,5 @@ export function verifyChain(events: SealedEvent[], publicKeys: Record<string, Ke
 }
 
 export function chainIsValid(results: ReturnType<typeof verifyChain>) {
-  return results.every(item => item.hashOk && item.sigOk && item.prevOk);
+  return results.length > 0 && results.every(item => item.hashOk && item.sigOk && item.prevOk);
 }

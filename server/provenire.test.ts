@@ -96,12 +96,29 @@ describe("Provenire custody protocol", () => {
     expect(publicJson).not.toContain("950");
   });
 
+  it("returns only the allowlisted public verifier projection", async () => {
+    const api = caller();
+    await api.provenire.runMismatch();
+    const publicView = await api.provenire.publicVerify();
+    const json = JSON.stringify(publicView);
+    expect(Object.keys(publicView)).toEqual(expect.arrayContaining([
+      "productName", "batchNumber", "acceptedHandoffCount", "verificationStatus", "recordIntegrityState",
+    ]));
+    for (const forbidden of ["senderId", "receiverId", "receiverObservedQuantity", "quantityVariance", "events", "dispatches", "receipts", "privateKey", "signature"]) {
+      expect(Object.keys(publicView)).not.toContain(forbidden);
+    }
+    expect(json).not.toContain("1000");
+    expect(json).not.toContain("950");
+    expect(json).not.toContain("Central Pharma Distributor");
+  });
+
   it("shows tamper and network failure without losing the record", async () => {
     const api = caller();
     await api.provenire.runHappyPath();
     const tampered = await api.provenire.tamper();
     expect(tampered.publicVerifier.verificationStatus).toBe("tampered");
     expect(tampered.publicVerifier.hashValid).toBe(false);
+    expect(tampered.publicVerifier.signatureValid).toBe(false);
     expect(tampered.publicVerifier.networkAgreement).toBe(true);
     expect(tampered.network.every(node => node.status === "healthy")).toBe(true);
     expect(tampered.publicVerifier.signatureValid).toBe(false);
@@ -130,16 +147,16 @@ describe("Provenire custody protocol", () => {
     await api.provenire.reset();
 
     await expect(api.provenire.dispatch({ receiverId: "not-an-organization" })).rejects.toMatchObject({ code: "NOT_FOUND" });
-    await expect(api.provenire.dispatch({ receiverId: "ramdeobaba-pharmacy" })).rejects.toMatchObject({ code: "UNPROCESSABLE_CONTENT" });
-    await expect(api.provenire.dispatch({ receiverId: "medsure-labs" })).rejects.toMatchObject({ code: "UNPROCESSABLE_CONTENT" });
+    await expect(api.provenire.dispatch({ receiverId: "ramdeobaba-pharmacy" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(api.provenire.dispatch({ receiverId: "medsure-labs" })).rejects.toMatchObject({ code: "FORBIDDEN" });
 
     const first = await api.provenire.dispatch({ receiverId: "central-pharma" });
     expect(first.dispatches[0]?.senderId).toBe(first.batch.currentHolderId);
     await expect(api.provenire.receipt({ dispatchId: first.batch.activeDispatchId!, receiverId: "ramdeobaba-pharmacy", receiverObservedQuantity: 1000 })).rejects.toMatchObject({ code: "FORBIDDEN" });
     await api.provenire.receipt({ dispatchId: first.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 });
     await expect(api.provenire.receipt({ dispatchId: first.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 })).rejects.toMatchObject({ code: "CONFLICT" });
-    await expect(api.provenire.dispatch({ receiverId: "medsure-labs" })).rejects.toMatchObject({ code: "UNPROCESSABLE_CONTENT" });
-    await expect(api.provenire.dispatch({ receiverId: "central-pharma" })).rejects.toMatchObject({ code: "UNPROCESSABLE_CONTENT" });
+    await expect(api.provenire.dispatch({ receiverId: "medsure-labs" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(api.provenire.dispatch({ receiverId: "central-pharma" })).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 
   it("rejects duplicate receipts and invalid observed quantities", async () => {

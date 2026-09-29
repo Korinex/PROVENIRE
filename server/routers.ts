@@ -4,7 +4,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
 import { TRPCError } from "@trpc/server";
-import { generateOrgKeys, sealEvent, verifyChain, chainIsValid } from "./proof";
+import { generateOrgKeys, sealEvent, verifyChain, chainIsValid } from "./proof/index";
 import type { EventBody as ProofEventBody, SealedEvent } from "./proof/seal";
 
 type OrgRole = "manufacturer" | "distributor" | "hospital_pharmacy";
@@ -53,6 +53,7 @@ type Receipt = {
   observedAt: string;
   status: HandoffState;
   variance: number;
+  varianceDirection: "shortage" | "overage" | null;
   proof: Proof;
 };
 type Conflict = {
@@ -83,6 +84,7 @@ type DemoState = {
     observedReceiverId: string | null;
     receiverObservedQuantity: number | null;
     quantityVariance: number;
+    varianceDirection: "shortage" | "overage" | null;
     acceptedForOnwardCustody: number;
     handoffState: HandoffState | "origin_verified";
     recordIntegrityState: "valid" | "tampered";
@@ -150,9 +152,8 @@ function addEvent(
   payload: Record<string, unknown>,
   eventTime = now()
 ) {
-  const payloadWithTime = { ...payload };
-  const timestampKey = "observedAt" in payloadWithTime ? "observedAt" : "occurredAt";
-  payloadWithTime[timestampKey] = eventTime;
+  const payloadWithTime = { ...payload, occurredAt: eventTime };
+  if ("observedAt" in payloadWithTime) payloadWithTime.observedAt = eventTime;
 
   const eventId = `event-${state.events.length + 1}`;
   const body: EventBody = {
@@ -194,6 +195,7 @@ function makeInitialState(): DemoState {
       observedReceiverId: null,
       receiverObservedQuantity: null,
       quantityVariance: 0,
+      varianceDirection: null,
       acceptedForOnwardCustody: 1000,
       handoffState: "origin_verified" as const,
       recordIntegrityState: "valid" as const,
@@ -258,6 +260,8 @@ function createDispatch(current: DemoState, receiverId: string, quantityOverride
   if (current.batch.currentHolderId !== ROUTE[current.batch.acceptedHandoffs]) {
     throw new TRPCError({ code: "FORBIDDEN", message: "Only the current holder can dispatch the next route handoff." });
   }
+  const receiver = current.organizations.find(org => org.id === receiverId);
+  if (!receiver) throw new TRPCError({ code: "NOT_FOUND", message: "Receiver organization not found." });
   const expectedReceiverId = getExpectedReceiverId(current);
   if (!expectedReceiverId) {
     throw new TRPCError({ code: "CONFLICT", message: "All handoffs for this route are complete." });
@@ -265,8 +269,6 @@ function createDispatch(current: DemoState, receiverId: string, quantityOverride
   if (receiverId !== expectedReceiverId) {
     throw new TRPCError({ code: "FORBIDDEN", message: `Expected next receiver is ${orgName(current, expectedReceiverId)}, not ${orgName(current, receiverId)}.` });
   }
-  const receiver = current.organizations.find(org => org.id === receiverId);
-  if (!receiver) throw new TRPCError({ code: "NOT_FOUND", message: "Receiver organization not found." });
   if (receiverId === current.batch.currentHolderId) {
     throw new TRPCError({ code: "UNPROCESSABLE_CONTENT", message: "Sender and receiver must be different organizations." });
   }
@@ -346,6 +348,7 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
     observedAt: event.occurredAt,
     status,
     variance,
+    varianceDirection: variance === 0 ? null : observedQuantity < dispatch.dispatchedQuantity ? "shortage" : "overage",
     proof: event.proof,
   };
   current.receipts.push(receipt);
@@ -354,6 +357,7 @@ function createReceipt(current: DemoState, dispatchId: string, receiverId: strin
   current.batch.observedReceiverId = receiverId;
   current.batch.receiverObservedQuantity = observedQuantity;
   current.batch.quantityVariance = variance;
+  current.batch.varianceDirection = receipt.varianceDirection;
   current.batch.handoffState = status;
 
   if (status === "accepted") {
@@ -412,8 +416,8 @@ function publicVerifier(current: DemoState) {
   const networkIncomplete = current.batch.networkState === "incomplete";
   let verificationStatus = "verified_history";
   if (tampered) verificationStatus = "tampered";
-  else if (networkIncomplete) verificationStatus = "network_disagreement";
   else if (conflictOpen) verificationStatus = "needs_review";
+  else if (networkIncomplete) verificationStatus = "network_disagreement";
   else if (current.batch.handoffState === "receiver_pending") verificationStatus = "receiver_pending";
   else if (current.batch.routeCoverageState === "incomplete") verificationStatus = "coverage_incomplete";
 
@@ -480,6 +484,7 @@ export const appRouter = router({
   }),
   provenire: router({
     state: publicProcedure.query(() => snapshot(state)),
+    publicVerify: publicProcedure.query(() => publicVerifier(state)),
     reset: publicProcedure.mutation(() => {
       state = makeInitialState();
       tamperedEvents = null;
@@ -523,8 +528,6 @@ export const appRouter = router({
       const quantity = event.payload.quantity;
       event.payload = { ...event.payload, ...(typeof quantity === "number" ? { quantity: quantity + 1 } : { tampered: true }) };
       state.batch.recordIntegrityState = "tampered";
-      state.batch.networkState = "incomplete";
-      state.network = state.network.map((node, index) => index === 2 ? { ...node, status: "unavailable" as const } : node);
       addActivity(state, "Tamper detected", "A signed field no longer matches its stored proof", "danger");
       return snapshot(state);
     }),
@@ -534,9 +537,6 @@ export const appRouter = router({
         tamperedEvents = null;
       }
       state.batch.recordIntegrityState = "valid";
-      state.batch.networkState = "agreement";
-      state.network = state.network.map(node => ({ ...node, status: "healthy" as const }));
-      refreshNodeHeads(state);
       addActivity(state, "Proof restored", "Reset or restoration returned the record to a valid state", "good");
       return snapshot(state);
     }),

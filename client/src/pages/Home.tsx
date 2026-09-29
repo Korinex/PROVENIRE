@@ -77,7 +77,7 @@ function HandoffCard({ dispatch, receipt, onReceipt, busy }: { dispatch: State["
   const [quantity, setQuantity] = useState(String(dispatch.dispatchedQuantity));
   const pending = dispatch.status === "receiver_pending";
   const mismatch = dispatch.status === "needs_review";
-    return <div className={cn("handoff-card", mismatch && "handoff-danger", integrityTampered && "integrity-flagged")}>
+  return <div className={cn("handoff-card", mismatch && "handoff-danger")}>
     <div className="flex items-start justify-between gap-4">
       <div className="flex min-w-0 items-start gap-3"><div className={cn("icon-box", pending ? "icon-amber" : mismatch ? "icon-rose" : "icon-cyan")}><Truck size={18} /></div><div className="min-w-0"><div className="eyebrow">Handoff {dispatch.id.split("-")[1]}</div><h3 className="handoff-route-title mt-1">{dispatch.senderName}<ArrowRight className="mx-2 inline text-slate-500" size={15} />{dispatch.receiverName}</h3><p className="handoff-meta mt-1">Dispatch signed at {formatTime(dispatch.occurredAt)} · {dispatch.location}</p></div></div>
       <StatusPill tone={pending ? "warning" : mismatch ? "danger" : "good"}>{dispatch.status.replace("_", " ")}</StatusPill>

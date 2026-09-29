@@ -38,9 +38,9 @@ describe("standalone proof module", () => {
     expect(chainIsValid(verifyChain([first], {}))).toBe(false);
   });
 
-  it("treats an empty chain as the valid starting state", () => {
+  it("rejects an empty chain as unanchored history", () => {
     expect(verifyChain([], {}).length).toBe(0);
-    expect(chainIsValid(verifyChain([], {}))).toBe(true);
+    expect(chainIsValid(verifyChain([], {}))).toBe(false);
   });
 
   it("rejects signed payload, quantity, and event type changes", () => {
@@ -68,8 +68,4 @@ describe("standalone proof module", () => {
     expect(buildReceiptPayload({ ...dispatch, recordHash: "changed" }, { receipt: true }).dispatchRecordHash).toBe("changed");
   });
 
-  it.todo("tamper actually invalidates the existing demo proof");
-  it.todo("tamper takes Node 3 offline");
-  it.todo("public state response does not leak quantities or organization IDs");
-  it.todo("status priority when node is down and conflict is open");
 });
