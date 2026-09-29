@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { createHash } from "node:crypto";
-import { appendTransitCheckpoint, appRouter, makeInitialState } from "./routers";
+import { appRouter, isLocationStale, isOnPredefinedRoute } from "./routers";
 import type { TrpcContext } from "./_core/context";
-import { getLocationFreshness, STALE_LOCATION_THRESHOLD_MS } from "./location";
-import { canonicalize } from "./proof";
 
 function caller() {
   const ctx: TrpcContext = {
-    user: null,
+    user: { id: 1, openId: "demo-admin", email: "demo-user@example.com", name: "Demo Admin", loginMethod: "manus", role: "admin", createdAt: new Date(), updatedAt: new Date(), lastSignedIn: new Date() },
+    req: { protocol: "https", headers: {} } as TrpcContext["req"],
+    res: {} as TrpcContext["res"],
+  };
+  return appRouter.createCaller(ctx);
+}
+
+function callerForEmail(email: string) {
+  const ctx: TrpcContext = {
+    user: { id: 2, openId: email, email, name: "Demo User", loginMethod: "manus", role: "user", createdAt: new Date(), updatedAt: new Date(), lastSignedIn: new Date() },
     req: { protocol: "https", headers: {} } as TrpcContext["req"],
     res: {} as TrpcContext["res"],
   };
@@ -102,17 +108,125 @@ describe("Provenire custody protocol", () => {
   it("returns only the allowlisted public verifier projection", async () => {
     const api = caller();
     await api.provenire.runMismatch();
-    const publicView = await api.provenire.publicVerify();
+    const publicView = await api.provenire.publicVerifyByToken({ token: "MS-2026-001" });
     const json = JSON.stringify(publicView);
-    expect(Object.keys(publicView)).toEqual(expect.arrayContaining([
-      "productName", "batchNumber", "acceptedHandoffCount", "verificationStatus", "recordIntegrityState",
-    ]));
-    for (const forbidden of ["senderId", "receiverId", "receiverObservedQuantity", "quantityVariance", "events", "dispatches", "receipts", "privateKey", "signature"]) {
+    expect(Object.keys(publicView).sort()).toEqual(["batchNumber", "conflictOpen", "productName", "recordIntegrityState", "status"].sort());
+    for (const forbidden of ["quantity", "receiverObservedQuantity", "quantityVariance", "route", "senderId", "receiverId", "organizationId", "dispatches", "receipts", "events", "payload", "signature", "recordHash", "activity"]) {
       expect(Object.keys(publicView)).not.toContain(forbidden);
     }
     expect(json).not.toContain("1000");
     expect(json).not.toContain("950");
     expect(json).not.toContain("Central Pharma Distributor");
+    expect(publicView).toEqual({ batchNumber: "MS-2026-001", productName: "MedSure 500 mg", recordIntegrityState: "valid", conflictOpen: true, status: "needs_review" });
+    expect(await api.provenire.publicVerifyByToken({ token: "not-a-batch" })).toEqual({ batchNumber: "", productName: "", recordIntegrityState: "invalid", conflictOpen: false, status: "not_found" });
+  });
+
+  it("denies anonymous and unmapped accounts detailed procedures while keeping token verification public", async () => {
+    const anonymous = appRouter.createCaller({ user: null, req: { protocol: "https", headers: {} } as TrpcContext["req"], res: {} as TrpcContext["res"] });
+    await expect(anonymous.provenire.state()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(anonymous.provenire.route()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(anonymous.provenire.locationTrace()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(anonymous.provenire.incident()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(anonymous.provenire.dispatch({ receiverId: "central-pharma" })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    expect((await anonymous.provenire.publicVerifyByToken({ token: "MS-2026-001" })).status).toBe("needs_review");
+
+    const unmapped = callerForEmail("stranger@example.com");
+    await expect(unmapped.provenire.state()).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const pending = callerForEmail("demo-pending@example.com");
+    await expect(pending.provenire.state()).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const suspended = callerForEmail("demo-suspended@example.com");
+    await expect(suspended.provenire.state()).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("signs simulated checkpoints, updates vehicle position, and blocks movement during a hold", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    const before = await api.provenire.route();
+    const moved = await api.provenire.advanceVehicleCheckpoint({ legId: `leg-${pending.dispatches[0]!.id}` });
+    expect(moved.events.at(-1)?.type).toBe("transit_checkpoint");
+    expect(moved.publicVerifier.signatureValid).toBe(true);
+    expect((await api.provenire.route()).lastReportAt).not.toBe(before.lastReportAt);
+    await api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 950 });
+    const held = await api.provenire.activateSimulatedHold({ reason: "Reported quantity discrepancy" });
+    expect(held.incident.onwardMovementBlocked).toBe(true);
+    expect(held.status.vehicleStatus).toBe("held");
+    expect(held.status.headline).toBe("held");
+    await expect(api.provenire.dispatch({ receiverId: "ramdeobaba-pharmacy" })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("supports stale and route-deviation classification with a deterministic clock", () => {
+    const reference = Date.parse("2026-09-29T12:00:00.000Z");
+    expect(isLocationStale("2026-09-29T11:30:00.000Z", reference)).toBe(false);
+    expect(isLocationStale("2026-09-29T10:00:00.000Z", reference)).toBe(true);
+    expect(isLocationStale(null, reference)).toBe(true);
+    expect(isOnPredefinedRoute({ latitude: 28.6139, longitude: 77.209 })).toBe(true);
+    expect(isOnPredefinedRoute({ latitude: 0, longitude: 0 })).toBe(false);
+  });
+
+  it("enforces approved participant roles and grants observers read-only access", async () => {
+    const admin = caller();
+    await admin.provenire.reset();
+    const manufacturer = callerForEmail("demo-user@example.com");
+    const distributor = callerForEmail("demo-distributor@example.com");
+    const hospital = callerForEmail("demo-hospital@example.com");
+    const dispatched = await manufacturer.provenire.dispatch({ receiverId: "central-pharma" });
+    const received = await distributor.provenire.receipt({ dispatchId: dispatched.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 });
+    expect(received.batch.currentHolderId).toBe("central-pharma");
+    const second = await distributor.provenire.dispatch({ receiverId: "ramdeobaba-pharmacy" });
+    const completed = await hospital.provenire.receipt({ dispatchId: second.batch.activeDispatchId!, receiverId: "ramdeobaba-pharmacy", receiverObservedQuantity: 1000 });
+    expect(completed.batch.routeCoverageState).toBe("complete");
+    expect((await callerForEmail("demo-auditor@example.com").provenire.state()).batch.batchNumber).toBe("MS-2026-001");
+    expect((await callerForEmail("demo-regulator@example.com").provenire.state()).batch.batchNumber).toBe("MS-2026-001");
+    await expect(callerForEmail("demo-auditor@example.com").provenire.reset()).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(callerForEmail("demo-regulator@example.com").provenire.dispatch({ receiverId: "central-pharma" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("treats a receipt at the wrong facility as a separate location conflict", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    const result = await api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000, facilityId: "ramdeobaba-pharmacy" });
+    expect(result.location.status).toBe("mismatch");
+    expect(result.locationMismatch).toBe(true);
+    expect(result.batch.quantityState).toBe("consistent");
+    expect(result.batch.handoffState).toBe("needs_review");
+    expect(result.batch.onwardDispatchAllowed).toBe(false);
+    expect((await api.provenire.publicVerifyByToken({ token: "MS-2026-001" })).status).toBe("needs_review");
+    await expect(api.provenire.dispatch({ receiverId: "ramdeobaba-pharmacy" })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("distinguishes simulated verifier disagreement from an unavailable peer", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const disagreement = await api.provenire.togglePeer({ nodeId: "node-2", diverge: true });
+    expect(disagreement.status.verifierAvailability).toBe("disagreement");
+    expect(disagreement.publicVerifier.networkAgreement).toBe(false);
+    expect(disagreement.network.every(node => node.status === "healthy")).toBe(true);
+    expect(disagreement.network.find(node => node.id === "node-2")?.verificationResult).toBe("valid");
+    expect(disagreement.network.find(node => node.id === "node-2")?.eventIds).toHaveLength(disagreement.events.length);
+    await api.provenire.reset();
+    const incomplete = await api.provenire.togglePeer({ nodeId: "node-2" });
+    expect(incomplete.status.verifierAvailability).toBe("incomplete");
+  });
+
+  it("activates recalls, enforces acknowledgment identity, and stores stock as reported information", async () => {
+    const admin = caller();
+    await admin.provenire.runMismatch();
+    const recalled = await admin.provenire.activateSimulatedHold({ reason: "Reported discrepancy requires investigation", type: "simulated_recall" });
+    expect(recalled.status.headline).toBe("recalled");
+    expect(recalled.status.vehicleStatus).toBe("recalled");
+    expect(recalled.transitLegs[0]?.status).toBe("recalled");
+    const distributor = callerForEmail("demo-distributor@example.com");
+    await expect(distributor.provenire.acknowledgeHold({ incidentId: "incident-1", organizationId: "medsure-labs" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const acknowledged = await distributor.provenire.acknowledgeHold({ incidentId: "incident-1", organizationId: "central-pharma" });
+    expect(acknowledged.incident.acknowledgments.at(-1)?.organizationId).toBe("central-pharma");
+    const report = await distributor.provenire.reportStockStatus({ incidentId: "incident-1", status: "quarantine_reported", quantity: 950 });
+    expect(report.stockReport.evidentiaryStatus).toBe("reported_information");
+    expect(report.incident.timeline.map(item => item.type)).toContain("stock_status_reported");
+    expect(new Set(report.incident.timeline.map(item => item.id)).size).toBe(report.incident.timeline.length);
+    expect(report.incident.timeline.map(item => item.type)).toContain("conflict_opened");
+    expect(report.incident.timeline.map(item => item.type)).toContain("onward_movement_blocked");
   });
 
   it("shows tamper and network failure without losing the record", async () => {
@@ -284,86 +398,5 @@ describe("Provenire custody protocol", () => {
     const state = await api.provenire.state();
     expect(state.activity.length).toBeLessThanOrEqual(12);
     expect(state.activity[0]).toMatchObject({ id: expect.any(String), label: expect.any(String), occurredAt: expect.any(String) });
-  });
-
-  it("appends a signed custody location event linked to the prior record", async () => {
-    const state = await caller().provenire.reset();
-    const event = state.events.find(item => item.type === "custody_location")!;
-    const prior = state.events[state.events.indexOf(event) - 1]!;
-    expect(event.payload).toMatchObject({ facilityId: "medsure-labs", organizationId: "medsure-labs", latitude: 19.076, longitude: 72.8777 });
-    expect(event.proof.previousHash).toBe(prior.proof.recordHash);
-    expect(event.proof.recordHash).toMatch(/^[a-f0-9]{64}$/);
-    expect(state.publicVerifier.signatureValid).toBe(true);
-  });
-
-  it("restricts simulated checkpoints to the predefined route through the internal helper", () => {
-    const state = makeInitialState();
-    state.transitLegs.push({ id: "leg-test-1", batchId: state.batch.id, vehicleId: "PROV-TRUCK-07", senderId: "medsure-labs", receiverId: "central-pharma", originLocationId: "medsure-labs", destinationLocationId: "central-pharma", status: "in_transit", startedAt: state.events.at(-1)!.occurredAt, lastCheckpointAt: null, lastCheckpointLocation: null });
-    expect(() => appendTransitCheckpoint(state, "leg-test-1", "not-a-route-stop")).toThrow("predefined simulated route");
-    appendTransitCheckpoint(state, "leg-test-1", "surat");
-    const event = state.events.at(-1)!;
-    expect(event.payload).toMatchObject({ vehicleId: "PROV-TRUCK-07", checkpointLabel: "Surat (simulated)", source: "simulated_gps" });
-    expect(state.transitLegs[0]?.lastCheckpointAt).toBe(event.occurredAt);
-    expect(state.transitLegs[0]?.lastCheckpointLocation?.label).toBe("Surat (simulated)");
-  });
-
-  it("detects tampered location and checkpoint payload hashes", async () => {
-    const api = caller();
-    await api.provenire.reset();
-    expect((await api.provenire.tamper()).publicVerifier.hashValid).toBe(false);
-    const state = makeInitialState();
-    state.transitLegs.push({ id: "leg-test-2", batchId: state.batch.id, vehicleId: "PROV-TRUCK-07", senderId: "medsure-labs", receiverId: "central-pharma", originLocationId: "medsure-labs", destinationLocationId: "central-pharma", status: "in_transit", startedAt: state.events.at(-1)!.occurredAt, lastCheckpointAt: null, lastCheckpointLocation: null });
-    appendTransitCheckpoint(state, "leg-test-2", "surat");
-    const event = state.events.at(-1)!;
-    event.payload.latitude = 0;
-    const hash = createHash("sha256").update(canonicalize({ eventId: event.id, batchId: state.batch.id, seq: state.events.length - 1, type: event.type, actorOrgId: event.actorId, occurredAt: event.occurredAt, previousHash: event.proof.previousHash, payload: event.payload }), "utf8").digest("hex");
-    expect(hash).not.toBe(event.proof.recordHash);
-  });
-
-  it("holds a matching-quantity receipt at the wrong simulated facility", async () => {
-    const api = caller();
-    await api.provenire.reset();
-    const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
-    const state = await api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000, locationId: "ramdeobaba-pharmacy" });
-    expect(state.receipts[0]).toMatchObject({ locationMismatch: true, status: "needs_review", variance: 0 });
-    expect(state.batch).toMatchObject({ locationMismatch: true, quantityState: "consistent", onwardDispatchAllowed: false });
-    expect(state.conflicts).toHaveLength(0);
-  });
-
-  it("classifies simulated checkpoint freshness with an injected clock", () => {
-    const clock = () => Date.parse("2026-09-29T12:00:00.000Z");
-    expect(getLocationFreshness(null, clock)).toBe("unknown");
-    expect(getLocationFreshness("2026-09-29T11:45:00.000Z", clock)).toBe("fresh");
-    expect(getLocationFreshness(new Date(clock() - STALE_LOCATION_THRESHOLD_MS - 1).toISOString(), clock)).toBe("stale");
-  });
-
-  it("seeds simulated facility and vehicle data", () => {
-    const state = makeInitialState();
-    expect(state.facilities).toHaveLength(3);
-    expect(state.vehicles[0]).toMatchObject({ id: "PROV-TRUCK-07", carrierName: "Simulated Provenire Transport", dataSource: "Simulated GPS playback", simulated: true });
-  });
-
-  it("signs a custody arrival after an accepted receipt", async () => {
-    const api = caller();
-    await api.provenire.reset();
-    const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
-    const state = await api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 });
-    expect(state.events.at(-1)).toMatchObject({ type: "custody_location", actorId: "central-pharma", payload: expect.objectContaining({ facilityId: "central-pharma", reason: "arrived_at_facility" }) });
-  });
-
-  it("marks a completed simulated transit leg as arrived", async () => {
-    const api = caller();
-    await api.provenire.reset();
-    const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
-    const state = await api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 });
-    expect(state.transitLegs[0]?.status).toBe("arrived");
-  });
-
-  it("treats an invalid simulated report time as unknown", () => {
-    expect(getLocationFreshness("not-a-time", () => 0)).toBe("unknown");
-  });
-
-  it("does not expose a checkpoint mutation on the Provenire router", () => {
-    expect(Object.keys(appRouter._def.procedures)).not.toContain("provenire.appendTransitCheckpoint");
   });
 });
