@@ -29,7 +29,6 @@ import { Link } from "wouter";
 import { useRoute } from "wouter";
 import { QRCodeSVG } from "qrcode.react";
 import { RouteMap, type LocationSignal } from "@/components/RouteMap";
-import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
 import { cn } from "@/lib/utils";
 import { parseSafeVerificationUrl } from "@/lib/verificationUrl";
@@ -113,7 +112,6 @@ function AppHeader({ active, setActive, onReset, onRunHappy, onRunMismatch, busy
     { id: "network", label: "Network verify", icon: Network },
     { id: "public", label: "Public verifier", icon: Eye },
   ];
-  const { user, logout } = useAuth();
   return <>
     <aside className="proof-rail">
       <button className="rail-brand" onClick={() => setActive("overview")}><span className="rail-logo"><FlaskConical size={18} /></span><span className="rail-brand-copy"><strong>PROVENIRE</strong><small>SUPPLY NETWORK</small></span></button>
@@ -122,7 +120,7 @@ function AppHeader({ active, setActive, onReset, onRunHappy, onRunMismatch, busy
       <div className="rail-links">{nav.map(item => <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><item.icon size={15} /><span>{item.label}</span></button>)}</div>
       
     </aside>
-    <header className="app-header"><div className="topbar-context"><span className="mono">MS-2026-001 · SHA-256</span></div><div className="ml-auto flex items-center gap-2">{user ? <><span className="user-chip" title={user.email ?? ""}>{user.name || user.email}</span><button className="ghost-button" onClick={() => logout()}>Log out</button></> : <><Link href="/login" className="ghost-button">Log in</Link><Link href="/register" className="ghost-button">Register</Link></>}<button className="ghost-button" onClick={onReset}><RotateCcw size={14} />Reset</button><div className="relative group"><button className="primary-button compact" disabled={busy}><PlayIcon />Run demo</button><div className="demo-menu"><button onClick={onRunHappy}><CheckCircle2 size={14} />Run clean route</button><button onClick={onRunMismatch}><AlertTriangle size={14} />Run 1,000 → 950 mismatch</button></div></div></div></header>
+    <header className="app-header"><div className="topbar-context"><span className="mono">MS-2026-001 · SHA-256</span></div><div className="ml-auto flex items-center gap-2"><button className="ghost-button" onClick={onReset}><RotateCcw size={14} />Reset</button><div className="relative group"><button className="primary-button compact" disabled={busy}><PlayIcon />Run demo</button><div className="demo-menu"><button onClick={onRunHappy}><CheckCircle2 size={14} />Run clean route</button><button onClick={onRunMismatch}><AlertTriangle size={14} />Run 1,000 → 950 mismatch</button></div></div></div></header>
   </>;
 }
 function PlayIcon() { return <span className="play-icon"><span /></span>; }
