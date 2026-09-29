@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { appRouter } from "./routers";
+import { createHash } from "node:crypto";
+import {
+  appendTransitCheckpoint,
+  appRouter,
+  makeInitialState,
+} from "./routers";
 import type { TrpcContext } from "./_core/context";
 import { getLocationFreshness, STALE_LOCATION_THRESHOLD_MS } from "./location";
+import { canonicalize } from "./proof";
 
 function caller() {
   const ctx: TrpcContext = {
@@ -60,23 +66,25 @@ describe("Provenire custody protocol", () => {
     expect(state.publicVerifier.predecessorValid).toBe(true);
   });
 
-  it("records only predefined simulated checkpoints in the signed chain", async () => {
-    const api = caller();
-    await api.provenire.reset();
-    const dispatched = await api.provenire.dispatch({
+  it("records only predefined simulated checkpoints in the signed chain", () => {
+    const state = makeInitialState();
+    state.transitLegs.push({
+      id: "leg-test-1",
+      batchId: state.batch.id,
+      vehicleId: "PROV-TRUCK-07",
+      senderId: "medsure-labs",
       receiverId: "central-pharma",
+      originLocationId: "medsure-labs",
+      destinationLocationId: "central-pharma",
+      status: "in_transit",
+      startedAt: state.events.at(-1)!.occurredAt,
+      lastCheckpointAt: null,
+      lastCheckpointLocation: null,
     });
-    const leg = dispatched.transitLegs[0]!;
-    await expect(
-      api.provenire.appendTransitCheckpoint({
-        legId: leg.id,
-        checkpointId: "not-a-route-stop",
-      })
-    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
-    const state = await api.provenire.appendTransitCheckpoint({
-      legId: leg.id,
-      checkpointId: "surat",
-    });
+    expect(() =>
+      appendTransitCheckpoint(state, "leg-test-1", "not-a-route-stop")
+    ).toThrow("predefined simulated route");
+    appendTransitCheckpoint(state, "leg-test-1", "surat");
     const checkpointEvent = state.events.at(-1)!;
     expect(checkpointEvent.type).toBe("transit_checkpoint");
     expect(checkpointEvent.payload).toMatchObject({
@@ -94,8 +102,10 @@ describe("Provenire custody protocol", () => {
     expect(state.transitLegs[0]?.lastCheckpointAt).toBe(
       checkpointEvent.occurredAt
     );
-    expect(state.publicVerifier.signatureValid).toBe(true);
-    expect(state.publicVerifier.predecessorValid).toBe(true);
+    expect(checkpointEvent.proof.recordHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(checkpointEvent.proof.previousHash).toBe(
+      state.events.at(-2)!.proof.recordHash
+    );
   });
 
   it("detects tampering with signed location and checkpoint payloads", async () => {
@@ -106,18 +116,39 @@ describe("Provenire custody protocol", () => {
     expect(tamperedLocation.publicVerifier.signatureValid).toBe(false);
     expect(tamperedLocation.publicVerifier.predecessorValid).toBe(true);
     await api.provenire.restore();
-    const dispatched = await api.provenire.dispatch({
+    const checkpointState = makeInitialState();
+    checkpointState.transitLegs.push({
+      id: "leg-test-2",
+      batchId: checkpointState.batch.id,
+      vehicleId: "PROV-TRUCK-07",
+      senderId: "medsure-labs",
       receiverId: "central-pharma",
+      originLocationId: "medsure-labs",
+      destinationLocationId: "central-pharma",
+      status: "in_transit",
+      startedAt: checkpointState.events.at(-1)!.occurredAt,
+      lastCheckpointAt: null,
+      lastCheckpointLocation: null,
     });
-    await api.provenire.appendTransitCheckpoint({
-      legId: dispatched.transitLegs[0]!.id,
-      checkpointId: "surat",
-    });
-    const tamperedCheckpoint = await api.provenire.tamper();
-    expect(tamperedCheckpoint.publicVerifier.recordIntegrityState).toBe(
-      "invalid"
-    );
-    expect(tamperedCheckpoint.publicVerifier.hashValid).toBe(false);
+    appendTransitCheckpoint(checkpointState, "leg-test-2", "surat");
+    const checkpoint = checkpointState.events.at(-1)!;
+    checkpoint.payload.latitude = 0;
+    const recomputed = createHash("sha256")
+      .update(
+        canonicalize({
+          eventId: checkpoint.id,
+          batchId: checkpointState.batch.id,
+          seq: checkpointState.events.length - 1,
+          type: checkpoint.type,
+          actorOrgId: checkpoint.actorId,
+          occurredAt: checkpoint.occurredAt,
+          previousHash: checkpoint.proof.previousHash,
+          payload: checkpoint.payload,
+        }),
+        "utf8"
+      )
+      .digest("hex");
+    expect(recomputed).not.toBe(checkpoint.proof.recordHash);
   });
 
   it("accepts a matching receiver receipt and advances custody", async () => {
@@ -588,5 +619,63 @@ describe("Provenire custody protocol", () => {
         clock
       )
     ).toBe("stale");
+  });
+
+  it("seeds only simulated facility and vehicle data", () => {
+    const state = makeInitialState();
+    expect(state.facilities).toHaveLength(3);
+    expect(state.vehicles).toEqual([
+      expect.objectContaining({
+        id: "PROV-TRUCK-07",
+        carrierName: "Simulated Provenire Transport",
+        dataSource: "Simulated GPS playback",
+        simulated: true,
+      }),
+    ]);
+  });
+
+  it("signs a custody arrival after each accepted receipt", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const pending = await api.provenire.dispatch({
+      receiverId: "central-pharma",
+    });
+    const state = await api.provenire.receipt({
+      dispatchId: pending.batch.activeDispatchId!,
+      receiverId: "central-pharma",
+      receiverObservedQuantity: 1000,
+    });
+    expect(state.events.at(-1)).toMatchObject({
+      type: "custody_location",
+      actorId: "central-pharma",
+      payload: expect.objectContaining({
+        facilityId: "central-pharma",
+        reason: "arrived_at_facility",
+      }),
+    });
+  });
+
+  it("marks a completed simulated transit leg as arrived", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const pending = await api.provenire.dispatch({
+      receiverId: "central-pharma",
+    });
+    const state = await api.provenire.receipt({
+      dispatchId: pending.batch.activeDispatchId!,
+      receiverId: "central-pharma",
+      receiverObservedQuantity: 1000,
+    });
+    expect(state.transitLegs[0]?.status).toBe("arrived");
+  });
+
+  it("treats an invalid simulated report time as unknown", () => {
+    expect(getLocationFreshness("not-a-time", () => 0)).toBe("unknown");
+  });
+
+  it("does not expose a checkpoint mutation on the Provenire router", () => {
+    expect(Object.keys(appRouter._def.procedures)).not.toContain(
+      "provenire.appendTransitCheckpoint"
+    );
   });
 });

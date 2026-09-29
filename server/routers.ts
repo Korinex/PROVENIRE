@@ -123,7 +123,7 @@ type Conflict = {
   status: "open" | "resolved";
   createdAt: string;
 };
-type DemoState = {
+export type DemoState = {
   organizations: Organization[];
   batch: {
     id: string;
@@ -373,7 +373,7 @@ function addEvent(
   return event;
 }
 
-function makeInitialState(): DemoState {
+export function makeInitialState(): DemoState {
   const state = {
     organizations: organizations.map(org => ({ ...org })),
     batch: {
@@ -782,7 +782,8 @@ function createReceipt(
   return receipt;
 }
 
-function appendTransitCheckpoint(
+/** @internal Appends only a checkpoint from the predefined simulated route. */
+export function appendTransitCheckpoint(
   current: DemoState,
   legId: string,
   checkpointId: string
@@ -1001,12 +1002,6 @@ export const appRouter = router({
           input.receiverObservedQuantity,
           input.locationId
         );
-        return snapshot(state);
-      }),
-    appendTransitCheckpoint: publicProcedure
-      .input(z.object({ legId: z.string(), checkpointId: z.string() }))
-      .mutation(({ input }) => {
-        appendTransitCheckpoint(state, input.legId, input.checkpointId);
         return snapshot(state);
       }),
     tamper: publicProcedure.mutation(() => {
