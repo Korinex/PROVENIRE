@@ -6,7 +6,7 @@ import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { generateOrgKeys, sealEvent, verifyChain, chainIsValid } from "./proof/index";
 import type { EventBody as ProofEventBody, SealedEvent } from "./proof/seal";
-import { requireBatchParticipant } from "./access";
+import { getActorOrganizationId, requireBatchParticipant } from "./access";
 import { getLocationFreshness, getLocationStatus, getRouteStatus, getVehicleStatus } from "./location";
 import { deriveIncident } from "./incident";
 
@@ -79,6 +79,35 @@ type Conflict = {
   status: "open" | "resolved";
   createdAt: string;
 };
+type IncidentAcknowledgment = {
+  organizationId: string;
+  status: "pending" | "acknowledged";
+  acknowledgedAt: string | null;
+  stockStatus: "not_checked" | "quarantine_reported" | "stock_not_found" | "stock_recovered" | "dispensed_before_hold";
+  stockQuantity: number | null;
+  reported: true;
+};
+type IncidentTimelineEntry = {
+  id: string;
+  type: string;
+  occurredAt: string;
+  actorOrganizationId: string | null;
+  relatedEventIds: string[];
+  label: string;
+  simulated: true;
+};
+type IncidentState = {
+  id: string;
+  active: boolean;
+  type: "simulated_hold" | "simulated_recall" | null;
+  reason: string | null;
+  triggeredAt: string | null;
+  triggeredBy: string | null;
+  triggeredByEventIds: string[];
+  onwardMovementBlocked: boolean;
+  acknowledgments: IncidentAcknowledgment[];
+  timeline: IncidentTimelineEntry[];
+};
 export type DemoState = {
   organizations: Organization[];
   batch: {
@@ -114,6 +143,7 @@ export type DemoState = {
   dispatches: Dispatch[];
   receipts: Receipt[];
   conflicts: Conflict[];
+  incident: IncidentState;
   network: { id: string; name: string; status: "healthy" | "unavailable"; headHash: string; checkedAt: string }[];
   activity: { id: string; label: string; detail: string; tone: "neutral" | "good" | "warning" | "danger"; occurredAt: string }[];
 };
@@ -239,6 +269,18 @@ export function makeInitialState(): DemoState {
     dispatches: [] as Dispatch[],
     receipts: [] as Receipt[],
     conflicts: [] as Conflict[],
+    incident: {
+      id: "incident-none",
+      active: false,
+      type: null,
+      reason: null,
+      triggeredAt: null,
+      triggeredBy: null,
+      triggeredByEventIds: [],
+      onwardMovementBlocked: false,
+      acknowledgments: [],
+      timeline: [],
+    },
     network: ["Verifier North", "Verifier Central", "Verifier South"].map((name, index) => ({
       id: `node-${index + 1}`,
       name,
@@ -278,6 +320,9 @@ function getExpectedReceiverId(current: DemoState): string | undefined {
 }
 
 function createDispatch(current: DemoState, receiverId: string, quantityOverride?: number) {
+  if (current.incident.active) {
+    throw new TRPCError({ code: "CONFLICT", message: "Onward movement is blocked by a simulated hold." });
+  }
   if (current.batch.conflictState === "open") {
     throw new TRPCError({ code: "CONFLICT", message: "Next dispatch is blocked pending resolution or route completion." });
   }
@@ -623,6 +668,33 @@ function locationTraceView(current: DemoState) {
   };
 }
 
+function eventTimeline(current: DemoState): IncidentTimelineEntry[] {
+  return current.events.map(event => ({
+    id: `history-${event.id}`,
+    type: event.type,
+    occurredAt: event.occurredAt,
+    actorOrganizationId: event.actorId,
+    relatedEventIds: [event.id],
+    label: event.type === "origin"
+      ? "Batch origin signed"
+      : event.type === "dispatch"
+        ? "Dispatch signed"
+        : event.type === "receipt"
+          ? "Receiver reported quantity"
+          : event.label,
+    simulated: true as const,
+  }));
+}
+
+function holdView(current: DemoState) {
+  const timeline = [...eventTimeline(current), ...current.incident.timeline].sort((first, second) => first.occurredAt.localeCompare(second.occurredAt));
+  return {
+    ...current.incident,
+    timeline,
+    notice: "Simulated hold. Acknowledgments and stock status are participant-reported, not proof of physical quarantine.",
+  };
+}
+
 export const appRouter = router({
   system: systemRouter,
   auth: router({
@@ -712,6 +784,89 @@ export const appRouter = router({
     incident: protectedProcedure.query(({ ctx }) => {
       requireBatchParticipant(ctx.user, state.batch.id);
       return { ...deriveIncident(state), simulated: true as const };
+    }),
+    activateSimulatedHold: protectedProcedure
+      .input(z.object({ reason: z.string().trim().min(5).max(280), type: z.enum(["simulated_hold", "simulated_recall"]).default("simulated_hold") }).strict())
+      .mutation(({ ctx, input }) => {
+        const actorOrganizationId = getActorOrganizationId(ctx.user);
+        const derived = deriveIncident(state);
+        if (!derived.quantityConflictOpen && !derived.locationConflictOpen) {
+          throw new TRPCError({ code: "CONFLICT", message: "A simulated hold needs an open discrepancy." });
+        }
+        if (state.incident.active) throw new TRPCError({ code: "CONFLICT", message: "A simulated hold is already active." });
+        const triggeredAt = now();
+        const conflictDispatch = state.dispatches.at(-1);
+        const conflictEventIds = state.events
+          .filter(event => event.type === "dispatch" || event.type === "receipt")
+          .filter(event => event.type === "dispatch"
+            ? event.payload.senderId === conflictDispatch?.senderId && event.payload.receiverId === conflictDispatch?.receiverId
+            : event.payload.dispatchId === conflictDispatch?.id)
+          .map(event => event.id);
+        state.incident = {
+          id: `incident-${state.events.length + 1}`,
+          active: true,
+          type: input.type,
+          reason: input.reason,
+          triggeredAt,
+          triggeredBy: actorOrganizationId,
+          triggeredByEventIds: conflictEventIds,
+          onwardMovementBlocked: true,
+          acknowledgments: ROUTE.map(organizationId => ({
+            organizationId,
+            status: "pending",
+            acknowledgedAt: null,
+            stockStatus: "not_checked",
+            stockQuantity: null,
+            reported: true as const,
+          })),
+          timeline: [{
+            id: `timeline-${state.events.length + 1}`,
+            type: input.type,
+            occurredAt: triggeredAt,
+            actorOrganizationId,
+            relatedEventIds: conflictEventIds,
+            label: input.type === "simulated_recall" ? "Simulated recall activated" : "Simulated hold activated",
+            simulated: true,
+          }],
+        };
+        state.batch.onwardDispatchAllowed = false;
+        const affectedLeg = conflictDispatch
+          ? state.transitLegs.find(leg => leg.senderId === conflictDispatch.senderId && leg.receiverId === conflictDispatch.receiverId)
+          : state.transitLegs.at(-1);
+        if (affectedLeg) affectedLeg.status = input.type === "simulated_recall" ? "recalled" : "held";
+        addActivity(state, input.type === "simulated_recall" ? "Simulated recall activated" : "Simulated hold activated", input.reason, "danger");
+        return holdView(state);
+      }),
+    acknowledgeHold: protectedProcedure
+      .input(z.object({}).strict())
+      .mutation(({ ctx }) => {
+        const actorOrganizationId = getActorOrganizationId(ctx.user);
+        if (!state.incident.active) throw new TRPCError({ code: "CONFLICT", message: "No simulated hold is active." });
+        const acknowledgment = state.incident.acknowledgments.find(item => item.organizationId === actorOrganizationId);
+        if (!acknowledgment) throw new TRPCError({ code: "FORBIDDEN", message: "No organization membership." });
+        if (acknowledgment.status === "acknowledged") throw new TRPCError({ code: "CONFLICT", message: "Hold already acknowledged." });
+        const acknowledgedAt = now();
+        acknowledgment.status = "acknowledged";
+        acknowledgment.acknowledgedAt = acknowledgedAt;
+        state.incident.timeline.push({ id: `timeline-${state.incident.timeline.length + 1}`, type: "acknowledgment", occurredAt: acknowledgedAt, actorOrganizationId, relatedEventIds: [], label: "Simulated hold acknowledged", simulated: true });
+        return holdView(state);
+      }),
+    reportStockStatus: protectedProcedure
+      .input(z.object({ status: z.enum(["not_checked", "quarantine_reported", "stock_not_found", "stock_recovered", "dispensed_before_hold"]), quantity: z.number().int().min(0).max(MAX_QUANTITY).optional() }).strict())
+      .mutation(({ ctx, input }) => {
+        const actorOrganizationId = getActorOrganizationId(ctx.user);
+        if (!state.incident.active) throw new TRPCError({ code: "CONFLICT", message: "No simulated hold is active." });
+        const acknowledgment = state.incident.acknowledgments.find(item => item.organizationId === actorOrganizationId);
+        if (!acknowledgment) throw new TRPCError({ code: "FORBIDDEN", message: "No organization membership." });
+        acknowledgment.stockStatus = input.status;
+        acknowledgment.stockQuantity = input.quantity ?? null;
+        const occurredAt = now();
+        state.incident.timeline.push({ id: `timeline-${state.incident.timeline.length + 1}`, type: "stock_status", occurredAt, actorOrganizationId, relatedEventIds: [], label: "Participant-reported stock status", simulated: true });
+        return holdView(state);
+      }),
+    hold: protectedProcedure.query(({ ctx }) => {
+      requireBatchParticipant(ctx.user, state.batch.id);
+      return holdView(state);
     }),
     advanceVehicleCheckpoint: protectedProcedure
       .input(z.object({ legId: z.string() }).strict())
