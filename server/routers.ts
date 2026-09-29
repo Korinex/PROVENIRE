@@ -797,6 +797,7 @@ export const appRouter = router({
     activateSimulatedHold: protectedProcedure
       .input(z.object({ reason: z.string().trim().min(5).max(280), type: z.enum(["simulated_hold", "simulated_recall"]).default("simulated_hold") }).strict())
       .mutation(({ ctx, input }) => {
+        requireBatchParticipant(ctx.user, state.batch.id);
         const actorOrganizationId = getActorOrganizationId(ctx.user);
         const derived = deriveIncident(state);
         if (!derived.quantityConflictOpen && !derived.locationConflictOpen) {
@@ -849,6 +850,7 @@ export const appRouter = router({
     acknowledgeHold: protectedProcedure
       .input(z.object({}).strict())
       .mutation(({ ctx }) => {
+        requireBatchParticipant(ctx.user, state.batch.id);
         const actorOrganizationId = getActorOrganizationId(ctx.user);
         if (!state.incident.active) throw new TRPCError({ code: "CONFLICT", message: "No simulated hold is active." });
         const acknowledgment = state.incident.acknowledgments.find(item => item.organizationId === actorOrganizationId);
@@ -863,6 +865,7 @@ export const appRouter = router({
     reportStockStatus: protectedProcedure
       .input(z.object({ status: z.enum(["not_checked", "quarantine_reported", "stock_not_found", "stock_recovered", "dispensed_before_hold"]), quantity: z.number().int().min(0).max(MAX_QUANTITY).optional() }).strict())
       .mutation(({ ctx, input }) => {
+        requireBatchParticipant(ctx.user, state.batch.id);
         const actorOrganizationId = getActorOrganizationId(ctx.user);
         if (!state.incident.active) throw new TRPCError({ code: "CONFLICT", message: "No simulated hold is active." });
         const acknowledgment = state.incident.acknowledgments.find(item => item.organizationId === actorOrganizationId);
