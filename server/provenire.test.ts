@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { appRouter } from "./routers";
+import { appRouter, isLocationStale, isOnPredefinedRoute } from "./routers";
 import type { TrpcContext } from "./_core/context";
 
 function caller() {
   const ctx: TrpcContext = {
-    user: null,
+    user: { id: 1, openId: "demo-admin", email: "demo-user@example.com", name: "Demo Admin", loginMethod: "manus", role: "admin", createdAt: new Date(), updatedAt: new Date(), lastSignedIn: new Date() },
+    req: { protocol: "https", headers: {} } as TrpcContext["req"],
+    res: {} as TrpcContext["res"],
+  };
+  return appRouter.createCaller(ctx);
+}
+
+function callerForEmail(email: string) {
+  const ctx: TrpcContext = {
+    user: { id: 2, openId: email, email, name: "Demo User", loginMethod: "manus", role: "user", createdAt: new Date(), updatedAt: new Date(), lastSignedIn: new Date() },
     req: { protocol: "https", headers: {} } as TrpcContext["req"],
     res: {} as TrpcContext["res"],
   };
@@ -99,17 +108,125 @@ describe("Provenire custody protocol", () => {
   it("returns only the allowlisted public verifier projection", async () => {
     const api = caller();
     await api.provenire.runMismatch();
-    const publicView = await api.provenire.publicVerify();
+    const publicView = await api.provenire.publicVerifyByToken({ token: "MS-2026-001" });
     const json = JSON.stringify(publicView);
-    expect(Object.keys(publicView)).toEqual(expect.arrayContaining([
-      "productName", "batchNumber", "acceptedHandoffCount", "verificationStatus", "recordIntegrityState",
-    ]));
-    for (const forbidden of ["senderId", "receiverId", "receiverObservedQuantity", "quantityVariance", "events", "dispatches", "receipts", "privateKey", "signature"]) {
+    expect(Object.keys(publicView).sort()).toEqual(["batchNumber", "conflictOpen", "productName", "recordIntegrityState", "status"].sort());
+    for (const forbidden of ["quantity", "receiverObservedQuantity", "quantityVariance", "route", "senderId", "receiverId", "organizationId", "dispatches", "receipts", "events", "payload", "signature", "recordHash", "activity"]) {
       expect(Object.keys(publicView)).not.toContain(forbidden);
     }
     expect(json).not.toContain("1000");
     expect(json).not.toContain("950");
     expect(json).not.toContain("Central Pharma Distributor");
+    expect(publicView).toEqual({ batchNumber: "MS-2026-001", productName: "MedSure 500 mg", recordIntegrityState: "valid", conflictOpen: true, status: "needs_review" });
+    expect(await api.provenire.publicVerifyByToken({ token: "not-a-batch" })).toEqual({ batchNumber: "", productName: "", recordIntegrityState: "invalid", conflictOpen: false, status: "not_found" });
+  });
+
+  it("denies anonymous and unmapped accounts detailed procedures while keeping token verification public", async () => {
+    const anonymous = appRouter.createCaller({ user: null, req: { protocol: "https", headers: {} } as TrpcContext["req"], res: {} as TrpcContext["res"] });
+    await expect(anonymous.provenire.state()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(anonymous.provenire.route()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(anonymous.provenire.locationTrace()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(anonymous.provenire.incident()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(anonymous.provenire.dispatch({ receiverId: "central-pharma" })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    expect((await anonymous.provenire.publicVerifyByToken({ token: "MS-2026-001" })).status).toBe("needs_review");
+
+    const unmapped = callerForEmail("stranger@example.com");
+    await expect(unmapped.provenire.state()).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const pending = callerForEmail("demo-pending@example.com");
+    await expect(pending.provenire.state()).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const suspended = callerForEmail("demo-suspended@example.com");
+    await expect(suspended.provenire.state()).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("signs simulated checkpoints, updates vehicle position, and blocks movement during a hold", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    const before = await api.provenire.route();
+    const moved = await api.provenire.advanceVehicleCheckpoint({ legId: `leg-${pending.dispatches[0]!.id}` });
+    expect(moved.events.at(-1)?.type).toBe("transit_checkpoint");
+    expect(moved.publicVerifier.signatureValid).toBe(true);
+    expect((await api.provenire.route()).lastReportAt).not.toBe(before.lastReportAt);
+    await api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 950 });
+    const held = await api.provenire.activateSimulatedHold({ reason: "Reported quantity discrepancy" });
+    expect(held.incident.onwardMovementBlocked).toBe(true);
+    expect(held.status.vehicleStatus).toBe("held");
+    expect(held.status.headline).toBe("held");
+    await expect(api.provenire.dispatch({ receiverId: "ramdeobaba-pharmacy" })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("supports stale and route-deviation classification with a deterministic clock", () => {
+    const reference = Date.parse("2026-09-29T12:00:00.000Z");
+    expect(isLocationStale("2026-09-29T11:30:00.000Z", reference)).toBe(false);
+    expect(isLocationStale("2026-09-29T10:00:00.000Z", reference)).toBe(true);
+    expect(isLocationStale(null, reference)).toBe(true);
+    expect(isOnPredefinedRoute({ latitude: 28.6139, longitude: 77.209 })).toBe(true);
+    expect(isOnPredefinedRoute({ latitude: 0, longitude: 0 })).toBe(false);
+  });
+
+  it("enforces approved participant roles and grants observers read-only access", async () => {
+    const admin = caller();
+    await admin.provenire.reset();
+    const manufacturer = callerForEmail("demo-user@example.com");
+    const distributor = callerForEmail("demo-distributor@example.com");
+    const hospital = callerForEmail("demo-hospital@example.com");
+    const dispatched = await manufacturer.provenire.dispatch({ receiverId: "central-pharma" });
+    const received = await distributor.provenire.receipt({ dispatchId: dispatched.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000 });
+    expect(received.batch.currentHolderId).toBe("central-pharma");
+    const second = await distributor.provenire.dispatch({ receiverId: "ramdeobaba-pharmacy" });
+    const completed = await hospital.provenire.receipt({ dispatchId: second.batch.activeDispatchId!, receiverId: "ramdeobaba-pharmacy", receiverObservedQuantity: 1000 });
+    expect(completed.batch.routeCoverageState).toBe("complete");
+    expect((await callerForEmail("demo-auditor@example.com").provenire.state()).batch.batchNumber).toBe("MS-2026-001");
+    expect((await callerForEmail("demo-regulator@example.com").provenire.state()).batch.batchNumber).toBe("MS-2026-001");
+    await expect(callerForEmail("demo-auditor@example.com").provenire.reset()).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(callerForEmail("demo-regulator@example.com").provenire.dispatch({ receiverId: "central-pharma" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("treats a receipt at the wrong facility as a separate location conflict", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const pending = await api.provenire.dispatch({ receiverId: "central-pharma" });
+    const result = await api.provenire.receipt({ dispatchId: pending.batch.activeDispatchId!, receiverId: "central-pharma", receiverObservedQuantity: 1000, facilityId: "ramdeobaba-pharmacy" });
+    expect(result.location.status).toBe("mismatch");
+    expect(result.locationMismatch).toBe(true);
+    expect(result.batch.quantityState).toBe("consistent");
+    expect(result.batch.handoffState).toBe("needs_review");
+    expect(result.batch.onwardDispatchAllowed).toBe(false);
+    expect((await api.provenire.publicVerifyByToken({ token: "MS-2026-001" })).status).toBe("needs_review");
+    await expect(api.provenire.dispatch({ receiverId: "ramdeobaba-pharmacy" })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("distinguishes simulated verifier disagreement from an unavailable peer", async () => {
+    const api = caller();
+    await api.provenire.reset();
+    const disagreement = await api.provenire.togglePeer({ nodeId: "node-2", diverge: true });
+    expect(disagreement.status.verifierAvailability).toBe("disagreement");
+    expect(disagreement.publicVerifier.networkAgreement).toBe(false);
+    expect(disagreement.network.every(node => node.status === "healthy")).toBe(true);
+    expect(disagreement.network.find(node => node.id === "node-2")?.verificationResult).toBe("valid");
+    expect(disagreement.network.find(node => node.id === "node-2")?.eventIds).toHaveLength(disagreement.events.length);
+    await api.provenire.reset();
+    const incomplete = await api.provenire.togglePeer({ nodeId: "node-2" });
+    expect(incomplete.status.verifierAvailability).toBe("incomplete");
+  });
+
+  it("activates recalls, enforces acknowledgment identity, and stores stock as reported information", async () => {
+    const admin = caller();
+    await admin.provenire.runMismatch();
+    const recalled = await admin.provenire.activateSimulatedHold({ reason: "Reported discrepancy requires investigation", type: "simulated_recall" });
+    expect(recalled.status.headline).toBe("recalled");
+    expect(recalled.status.vehicleStatus).toBe("recalled");
+    expect(recalled.transitLegs[0]?.status).toBe("recalled");
+    const distributor = callerForEmail("demo-distributor@example.com");
+    await expect(distributor.provenire.acknowledgeHold({ incidentId: "incident-1", organizationId: "medsure-labs" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const acknowledged = await distributor.provenire.acknowledgeHold({ incidentId: "incident-1", organizationId: "central-pharma" });
+    expect(acknowledged.incident.acknowledgments.at(-1)?.organizationId).toBe("central-pharma");
+    const report = await distributor.provenire.reportStockStatus({ incidentId: "incident-1", status: "quarantine_reported", quantity: 950 });
+    expect(report.stockReport.evidentiaryStatus).toBe("reported_information");
+    expect(report.incident.timeline.map(item => item.type)).toContain("stock_status_reported");
+    expect(new Set(report.incident.timeline.map(item => item.id)).size).toBe(report.incident.timeline.length);
+    expect(report.incident.timeline.map(item => item.type)).toContain("conflict_opened");
+    expect(report.incident.timeline.map(item => item.type)).toContain("onward_movement_blocked");
   });
 
   it("shows tamper and network failure without losing the record", async () => {
